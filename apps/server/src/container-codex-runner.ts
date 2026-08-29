@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
+import { normalizeProtectedPaths } from "./protected-paths.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -13,8 +14,6 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
-
-export const POC_PROTECTED_PATHS = [".env", "deployment"] as const;
 
 interface ActiveContainer {
   child: ChildProcess;
@@ -51,34 +50,17 @@ export function buildWorkspaceMountArgs(request: RunnerRequest): string[] {
     "type=bind,src=" + request.workspacePath + ",dst=/workspace",
   ];
 
-  for (const declaredPath of request.protectedPaths ?? POC_PROTECTED_PATHS) {
-    if (
-      !declaredPath ||
-      path.posix.isAbsolute(declaredPath) ||
-      declaredPath.includes("\\") ||
-      declaredPath.includes(",")
-    ) {
-      throw new Error("Protected path must be a workspace-relative POSIX path: " + declaredPath);
-    }
-    const normalizedPath = path.posix.normalize(declaredPath);
-    if (
-      normalizedPath === "." ||
-      normalizedPath === ".." ||
-      normalizedPath.startsWith("../")
-    ) {
-      throw new Error("Protected path escapes the workspace: " + declaredPath);
-    }
-
+  for (const normalizedPath of normalizeProtectedPaths(request.protectedPaths)) {
     const candidatePath = path.resolve(workspacePath, normalizedPath);
     if (!isInsideWorkspace(workspacePath, candidatePath)) {
-      throw new Error("Protected path escapes the workspace: " + declaredPath);
+      throw new Error("Protected path escapes the workspace: " + normalizedPath);
     }
     if (!existsSync(candidatePath)) continue;
 
     const canonicalWorkspacePath = realpathSync(workspacePath);
     const sourcePath = realpathSync(candidatePath);
     if (!isInsideWorkspace(canonicalWorkspacePath, sourcePath)) {
-      throw new Error("Protected path resolves outside the workspace: " + declaredPath);
+      throw new Error("Protected path resolves outside the workspace: " + normalizedPath);
     }
     mounts.push(
       "--mount",

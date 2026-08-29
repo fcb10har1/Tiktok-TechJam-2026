@@ -38,6 +38,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/agent-workspace",
         prompt: "write a small program",
         threadId: null,
+        protectedPaths: [],
       },
       config,
     );
@@ -68,6 +69,7 @@ describe("Container Codex runner", () => {
         workspacePath: "/tmp/workspace",
         prompt: "continue",
         threadId: "thread-123",
+        protectedPaths: [],
       },
       config,
     );
@@ -92,6 +94,7 @@ describe("Container Codex runner", () => {
         workspacePath,
         prompt: "test",
         threadId: null,
+        protectedPaths: [".env", "deployment"],
       }),
     ).toEqual([
       "--mount",
@@ -121,7 +124,7 @@ describe("Container Codex runner", () => {
 
     expect(() =>
       buildWorkspaceMountArgs({ ...request, protectedPaths: ["../outside"] }),
-    ).toThrow("Protected path escapes the workspace");
+    ).toThrow("Protected path must be a workspace-relative POSIX path");
     expect(() =>
       buildWorkspaceMountArgs({ ...request, protectedPaths: ["escape"] }),
     ).toThrow("Protected path resolves outside the workspace");

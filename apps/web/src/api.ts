@@ -78,4 +78,17 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  updateExecutionContract: (id: string, protectedPaths: string[]) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/contract", {
+      method: "PATCH",
+      body: JSON.stringify({ protectedPaths }),
+    }),
+  approveRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/approve", {
+      method: "POST",
+    }),
+  cancelRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/cancel", {
+      method: "POST",
+    }),
 };

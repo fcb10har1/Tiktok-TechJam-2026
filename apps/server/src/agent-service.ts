@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import {
+  DEFAULT_PROTECTED_PATHS,
+  InvalidProtectedPathError,
+  normalizeProtectedPaths,
+} from "./protected-paths.js";
 import { JsonStore } from "./store.js";
 import type {
   Agent,
@@ -38,7 +43,10 @@ export class AgentService {
         }
       }
       for (const agent of database.agents) {
-        if (agent.status === "busy") {
+        const awaitingApproval = database.runs.some(
+          (run) => run.agentId === agent.id && run.status === "awaiting_approval",
+        );
+        if (agent.status === "busy" && !awaitingApproval) {
           agent.status = "ready";
           agent.updatedAt = now();
         }
@@ -122,6 +130,7 @@ export class AgentService {
 
   async stopAgent(id: string): Promise<Agent> {
     this.getAgent(id);
+    await this.cancelAwaitingRuns(id);
     await this.cancelExecution(id);
     return this.setStatus(id, "stopped");
   }
@@ -165,7 +174,7 @@ export class AgentService {
     const run: AgentRun = {
       id: runId,
       agentId,
-      status: "queued",
+      status: "awaiting_approval",
       prompt,
       output: null,
       error: null,
@@ -173,6 +182,12 @@ export class AgentService {
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
+      executionContract: {
+        version: 0,
+        protectedPaths: [...DEFAULT_PROTECTED_PATHS],
+        approvedAt: null,
+        updatedAt: timestamp,
+      },
     };
     const message: Message = {
       id: randomUUID(),
@@ -182,7 +197,7 @@ export class AgentService {
       content: prompt,
       createdAt: timestamp,
     };
-    const agentAtStart = await this.store.mutate((database) => {
+    await this.store.mutate((database) => {
       const storedAgent = database.agents.find((item) => item.id === agentId);
       if (!storedAgent) {
         throw new HttpError(404, "Agent not found");
@@ -195,22 +210,93 @@ export class AgentService {
       }
       database.runs.push(run);
       database.messages.push(message);
-      const snapshot = structuredClone(storedAgent);
       storedAgent.status = "busy";
       storedAgent.lastError = null;
       storedAgent.updatedAt = timestamp;
-      return snapshot;
     });
-    const execution = this.executeRun(agentAtStart, run);
-    this.activeExecutions.set(agentId, execution);
-    void execution
-      .finally(() => {
-        if (this.activeExecutions.get(agentId) === execution) {
-          this.activeExecutions.delete(agentId);
-        }
-      })
-      .catch(() => undefined);
     return { run, message };
+  }
+
+  async updateExecutionContract(
+    runId: string,
+    protectedPaths: readonly string[],
+  ): Promise<AgentRun> {
+    let normalizedPaths: string[];
+    try {
+      normalizedPaths = normalizeProtectedPaths(protectedPaths);
+    } catch (error) {
+      if (error instanceof InvalidProtectedPathError) {
+        throw new HttpError(400, error.message);
+      }
+      throw error;
+    }
+
+    return this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run) throw new HttpError(404, "Run not found");
+      if (run.status !== "awaiting_approval" || !run.executionContract) {
+        throw new HttpError(409, "Execution Contract can no longer be edited");
+      }
+      run.executionContract.protectedPaths = normalizedPaths;
+      run.executionContract.updatedAt = now();
+      return structuredClone(run);
+    });
+  }
+
+  async approveRun(runId: string): Promise<AgentRun> {
+    if (this.config.runtimeProvider !== "container") {
+      throw new HttpError(
+        409,
+        "Execution Contract v0 requires the container Runtime provider",
+      );
+    }
+    const approvedAt = now();
+    const approved = await this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run) throw new HttpError(404, "Run not found");
+      if (run.status !== "awaiting_approval" || !run.executionContract) {
+        throw new HttpError(409, "Run is not awaiting approval");
+      }
+      const agent = database.agents.find((item) => item.id === run.agentId);
+      if (!agent) throw new HttpError(404, "Agent not found");
+      if (agent.status === "stopped") {
+        throw new HttpError(409, "Start the Agent before approving this Run");
+      }
+
+      run.executionContract.protectedPaths = normalizeProtectedPaths(
+        run.executionContract.protectedPaths,
+      );
+      run.executionContract.approvedAt = approvedAt;
+      run.executionContract.updatedAt = approvedAt;
+      run.status = "queued";
+      agent.status = "busy";
+      agent.lastError = null;
+      agent.updatedAt = approvedAt;
+      return { run: structuredClone(run), agent: structuredClone(agent) };
+    });
+    this.scheduleExecution(approved.agent, approved.run.id);
+    return approved.run;
+  }
+
+  async cancelRun(runId: string): Promise<AgentRun> {
+    const cancelledAt = now();
+    return this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run) throw new HttpError(404, "Run not found");
+      if (run.status !== "awaiting_approval") {
+        throw new HttpError(409, "Only a Run awaiting approval can be cancelled here");
+      }
+      run.status = "cancelled";
+      run.error = "Cancelled before approval";
+      run.completedAt = cancelledAt;
+      if (run.executionContract) run.executionContract.updatedAt = cancelledAt;
+      const agent = database.agents.find((item) => item.id === run.agentId);
+      if (agent?.status === "busy") {
+        agent.status = "ready";
+        agent.updatedAt = cancelledAt;
+      }
+      return structuredClone(run);
+    });
   }
 
   async systemInfo(): Promise<Record<string, unknown>> {
@@ -232,15 +318,33 @@ export class AgentService {
     };
   }
 
-  private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
-    await this.store.mutate((database) => {
-      const storedRun = database.runs.find((item) => item.id === run.id);
-      if (storedRun) {
+  private scheduleExecution(agent: Agent, runId: string): void {
+    const execution = this.executeRun(agent, runId);
+    this.activeExecutions.set(agent.id, execution);
+    void execution
+      .finally(() => {
+        if (this.activeExecutions.get(agent.id) === execution) {
+          this.activeExecutions.delete(agent.id);
+        }
+      })
+      .catch(() => undefined);
+  }
+
+  private async executeRun(agentAtStart: Agent, runId: string): Promise<void> {
+    try {
+      const run = await this.store.mutate((database) => {
+        const storedRun = database.runs.find((item) => item.id === runId);
+        if (
+          !storedRun ||
+          storedRun.status !== "queued" ||
+          !storedRun.executionContract?.approvedAt
+        ) {
+          throw new Error("Run cannot execute without an approved Execution Contract");
+        }
         storedRun.status = "running";
         storedRun.startedAt = now();
-      }
-    });
-    try {
+        return structuredClone(storedRun);
+      });
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
@@ -249,10 +353,11 @@ export class AgentService {
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
+        protectedPaths: run.executionContract!.protectedPaths,
       });
       const completedAt = now();
       await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
+        const storedRun = database.runs.find((item) => item.id === runId);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (!storedRun || !agent) return;
         storedRun.status = "completed";
@@ -262,7 +367,7 @@ export class AgentService {
         database.messages.push({
           id: randomUUID(),
           agentId: agent.id,
-          runId: run.id,
+          runId,
           role: "assistant",
           content: result.output,
           createdAt: completedAt,
@@ -277,7 +382,7 @@ export class AgentService {
       const cancelled = error instanceof RunCancelledError;
       const message = error instanceof Error ? error.message : String(error);
       await this.store.mutate((database) => {
-        const storedRun = database.runs.find((item) => item.id === run.id);
+        const storedRun = database.runs.find((item) => item.id === runId);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
@@ -322,5 +427,19 @@ export class AgentService {
     } finally {
       this.cancellationRequests.delete(agentId);
     }
+  }
+
+  private async cancelAwaitingRuns(agentId: string): Promise<void> {
+    const cancelledAt = now();
+    await this.store.mutate((database) => {
+      for (const run of database.runs) {
+        if (run.agentId === agentId && run.status === "awaiting_approval") {
+          run.status = "cancelled";
+          run.error = "Cancelled before approval because the Agent was stopped";
+          run.completedAt = cancelledAt;
+          if (run.executionContract) run.executionContract.updatedAt = cancelledAt;
+        }
+      }
+    });
   }
 }

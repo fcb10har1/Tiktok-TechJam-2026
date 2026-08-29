@@ -1,5 +1,11 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatus =
+  | "awaiting_approval"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export type MessageRole = "user" | "assistant";
 
 export interface Agent {
@@ -30,6 +36,13 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
+export interface ExecutionContract {
+  version: 0;
+  protectedPaths: string[];
+  approvedAt: string | null;
+  updatedAt: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -41,6 +54,7 @@ export interface AgentRun {
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
+  executionContract?: ExecutionContract;
 }
 
 export interface Database {
@@ -73,7 +87,7 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
-  protectedPaths?: readonly string[];
+  protectedPaths: readonly string[];
 }
 
 export interface AgentRunner {

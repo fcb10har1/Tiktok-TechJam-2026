@@ -22,11 +22,11 @@ function formatTime(value: string): string {
   }).format(new Date(value));
 }
 
-function StatusPill({ status }: { status: Agent["status"] }) {
+function StatusPill({ status, label }: { status: Agent["status"]; label?: string }) {
   return (
     <span className={"status status-" + status}>
       <span className="status-dot" />
-      {status}
+      {label ?? status}
     </span>
   );
 }
@@ -45,6 +45,7 @@ export default function App() {
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [protectedPathInput, setProtectedPathInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -98,6 +99,7 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setProtectedPathInput("");
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
@@ -237,11 +239,65 @@ export default function App() {
           agent.id === selected.id ? { ...agent, status: "busy" } : agent,
         ),
       );
-      await pollRun(result.run.id, selected.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       setActiveRun(null);
       await refreshAgents();
+    }
+  };
+
+  const replaceProtectedPaths = async (protectedPaths: string[]) => {
+    if (!activeRun || activeRun.status !== "awaiting_approval") return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { run } = await api.updateExecutionContract(activeRun.id, protectedPaths);
+      setActiveRun(run);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addProtectedPath = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const protectedPath = protectedPathInput.trim();
+    const currentPaths = activeRun?.executionContract?.protectedPaths;
+    if (!protectedPath || !currentPaths) return;
+    await replaceProtectedPaths([...currentPaths, protectedPath]);
+    setProtectedPathInput("");
+  };
+
+  const approveRun = async () => {
+    if (!activeRun || activeRun.status !== "awaiting_approval" || !selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { run } = await api.approveRun(activeRun.id);
+      setActiveRun(run);
+      void pollRun(run.id, selected.id).catch((reason) =>
+        setError(reason instanceof Error ? reason.message : String(reason)),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cancelPendingRun = async () => {
+    if (!activeRun || activeRun.status !== "awaiting_approval" || !selected) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { run } = await api.cancelRun(activeRun.id);
+      setActiveRun(run);
+      await refreshAgents();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -398,7 +454,14 @@ export default function App() {
               <div>
                 <div className="header-title-row">
                   <h1>{selected.name}</h1>
-                  <StatusPill status={selected.status} />
+                  <StatusPill
+                    status={selected.status}
+                    label={
+                      activeRun?.status === "awaiting_approval"
+                        ? "Awaiting approval"
+                        : undefined
+                    }
+                  />
                 </div>
                 <p>{selected.description || "A Codex coding Agent in an isolated workspace."}</p>
               </div>
@@ -520,6 +583,87 @@ export default function App() {
                     </article>
                   ))
                 )}
+                {activeRun?.status === "awaiting_approval" &&
+                  activeRun.executionContract && (
+                    <article className="execution-contract">
+                      <div className="contract-header">
+                        <div>
+                          <span className="eyebrow">Execution Contract v0</span>
+                          <h3>Awaiting approval</h3>
+                        </div>
+                        <span className="contract-status">Awaiting approval</span>
+                      </div>
+                      <div className="contract-task">
+                        <strong>Task</strong>
+                        <p>{activeRun.prompt}</p>
+                      </div>
+                      <div className="contract-paths">
+                        <strong>Protected paths</strong>
+                        {activeRun.executionContract.protectedPaths.length === 0 ? (
+                          <p className="contract-empty">No paths are protected.</p>
+                        ) : (
+                          <ul>
+                            {activeRun.executionContract.protectedPaths.map((protectedPath) => (
+                              <li key={protectedPath}>
+                                <code>{protectedPath}</code>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void replaceProtectedPaths(
+                                      activeRun.executionContract?.protectedPaths.filter(
+                                        (item) => item !== protectedPath,
+                                      ) ?? [],
+                                    )
+                                  }
+                                  aria-label={"Remove protected path " + protectedPath}
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <form className="contract-add-path" onSubmit={addProtectedPath}>
+                          <input
+                            value={protectedPathInput}
+                            onChange={(event) => setProtectedPathInput(event.target.value)}
+                            placeholder="Add workspace-relative path"
+                            disabled={busy}
+                          />
+                          <button
+                            type="submit"
+                            className="button button-ghost"
+                            disabled={busy || !protectedPathInput.trim()}
+                          >
+                            Add path
+                          </button>
+                        </form>
+                      </div>
+                      <p className="contract-limitation">
+                        v0 mounts only paths that exist when the container starts. A listed path
+                        that does not exist can still be created during this Run.
+                      </p>
+                      <div className="contract-actions">
+                        <button
+                          type="button"
+                          className="button button-ghost"
+                          disabled={busy}
+                          onClick={() => void cancelPendingRun()}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="button button-primary"
+                          disabled={busy}
+                          onClick={() => void approveRun()}
+                        >
+                          {busy ? <Spinner /> : "Approve & Run"}
+                        </button>
+                      </div>
+                    </article>
+                  )}
                 {activeRun && ["queued", "running"].includes(activeRun.status) && (
                   <article className="message message-assistant thinking">
                     <div className="message-meta">
@@ -559,7 +703,8 @@ export default function App() {
                   disabled={
                     selected.status === "stopped" ||
                     selected.status === "busy" ||
-                    activeRun != null && ["queued", "running"].includes(activeRun.status)
+                    activeRun != null &&
+                    ["awaiting_approval", "queued", "running"].includes(activeRun.status)
                   }
                   rows={3}
                 />
@@ -573,7 +718,8 @@ export default function App() {
                       !prompt.trim() ||
                       selected.status === "stopped" ||
                       selected.status === "busy" ||
-                      (activeRun != null && ["queued", "running"].includes(activeRun.status))
+                      (activeRun != null &&
+                        ["awaiting_approval", "queued", "running"].includes(activeRun.status))
                     }
                     aria-label="Send message"
                   >

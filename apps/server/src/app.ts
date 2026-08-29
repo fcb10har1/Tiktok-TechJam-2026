@@ -22,6 +22,9 @@ const updateAgentBody = createAgentBody.partial().refine(
 const messageBody = z.object({
   content: z.string().trim().min(1).max(50_000),
 });
+const executionContractBody = z.object({
+  protectedPaths: z.array(z.string()).max(100),
+});
 
 export async function createApp(
   config: AppConfig,
@@ -126,6 +129,22 @@ export async function createApp(
   app.get("/api/runs/:id", async (request) => {
     const { id } = runIdParams.parse(request.params);
     return { run: service.getRun(id) };
+  });
+
+  app.patch("/api/runs/:id/contract", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    const body = executionContractBody.parse(request.body);
+    return { run: await service.updateExecutionContract(id, body.protectedPaths) };
+  });
+
+  app.post("/api/runs/:id/approve", async (request, reply) => {
+    const { id } = runIdParams.parse(request.params);
+    return reply.code(202).send({ run: await service.approveRun(id) });
+  });
+
+  app.post("/api/runs/:id/cancel", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    return { run: await service.cancelRun(id) };
   });
 
   if (config.nodeEnv === "production") {

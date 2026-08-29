@@ -791,6 +791,116 @@ textarea:focus {
   border-left: 2px solid #8a76e7;
 }
 
+.execution-contract {
+  margin: 0 0 24px;
+  padding: 18px;
+  border: 1px solid #d8d1f5;
+  border-radius: 14px;
+  background: #f8f6ff;
+  box-shadow: 0 10px 28px rgba(70, 54, 143, 0.08);
+}
+
+.contract-header,
+.contract-actions,
+.contract-add-path,
+.contract-paths li {
+  display: flex;
+  align-items: center;
+}
+
+.contract-header,
+.contract-actions,
+.contract-paths li {
+  justify-content: space-between;
+}
+
+.contract-header h3 {
+  margin: 3px 0 0;
+  font-size: 17px;
+}
+
+.contract-status {
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #e6e0ff;
+  color: #5f49c3;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.contract-task,
+.contract-paths {
+  margin-top: 16px;
+}
+
+.contract-task > strong,
+.contract-paths > strong {
+  font-size: 10px;
+}
+
+.contract-task p,
+.contract-empty {
+  margin: 6px 0 0;
+  color: #55554f;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.contract-paths ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.contract-paths li {
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid #e2def4;
+  border-radius: 8px;
+  background: white;
+}
+
+.contract-paths li button {
+  border: 0;
+  background: transparent;
+  color: #a04b4b;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.contract-add-path {
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.contract-add-path input {
+  margin: 0;
+  min-height: 36px;
+}
+
+.contract-add-path .button {
+  flex: 0 0 auto;
+}
+
+.contract-limitation {
+  margin: 14px 0;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f2efe5;
+  color: #706c5d;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.contract-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .thinking {
   opacity: 0.82;
 }

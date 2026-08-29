@@ -59,6 +59,7 @@ describe.skipIf(!integrationRequired)("AgentGuard container filesystem enforceme
         workspacePath,
         prompt: "deterministic filesystem probe",
         threadId: null,
+        protectedPaths: [".env", "deployment"],
       });
       const script = String.raw`
 set -eu

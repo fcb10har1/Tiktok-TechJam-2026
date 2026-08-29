@@ -1,5 +1,11 @@
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type RunStatus =
+  | "awaiting_approval"
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface Agent {
   id: string;
@@ -23,6 +29,13 @@ export interface Message {
   createdAt: string;
 }
 
+export interface ExecutionContract {
+  version: 0;
+  protectedPaths: string[];
+  approvedAt: string | null;
+  updatedAt: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -35,7 +48,10 @@ export interface AgentRun {
     cachedInputTokens?: number;
     outputTokens?: number;
   } | null;
+  startedAt: string | null;
+  completedAt: string | null;
   createdAt: string;
+  executionContract?: ExecutionContract;
 }
 
 export interface SystemInfo {
