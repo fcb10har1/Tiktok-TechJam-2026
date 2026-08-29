@@ -1,12 +1,10 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
-import path from "node:path";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
-import { normalizeProtectedPaths } from "./protected-paths.js";
 import type {
+  AuthorityMount,
   AgentRunner,
   RunUsage,
   RunnerRequest,
@@ -38,38 +36,43 @@ export function containerName(agentId: string, instanceId = "default"): string {
   return "launchpad-" + safeInstance + "-" + safeAgent;
 }
 
-function isInsideWorkspace(workspacePath: string, candidatePath: string): boolean {
-  const relative = path.relative(workspacePath, candidatePath);
-  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== "..");
+function nonRecursiveBindOption(engineName: string): string {
+  return engineName === "podman" ? "bind-nonrecursive" : "bind-recursive=disabled";
 }
 
-export function buildWorkspaceMountArgs(request: RunnerRequest): string[] {
-  const workspacePath = path.resolve(request.workspacePath);
+function authorityMountArgument(
+  mount: AuthorityMount,
+  readonly: boolean,
+  engineName: string,
+): string {
+  return (
+    "type=bind,src=" +
+    mount.sourcePath +
+    ",dst=/workspace/" +
+    mount.path +
+    (readonly ? ",readonly" : "") +
+    (mount.kind === "directory" ? "," + nonRecursiveBindOption(engineName) : "")
+  );
+}
+
+export function buildWorkspaceMountArgs(
+  request: RunnerRequest,
+  engine = "docker",
+): string[] {
+  const engineName = engine.split(/[\\/]/).at(-1)?.toLowerCase() ?? "docker";
   const mounts = [
     "--mount",
-    "type=bind,src=" + request.workspacePath + ",dst=/workspace",
+    "type=bind,src=" +
+      request.authorityPlan.workspaceSourcePath +
+      ",dst=/workspace,readonly," +
+      nonRecursiveBindOption(engineName),
   ];
 
-  for (const normalizedPath of normalizeProtectedPaths(request.protectedPaths)) {
-    const candidatePath = path.resolve(workspacePath, normalizedPath);
-    if (!isInsideWorkspace(workspacePath, candidatePath)) {
-      throw new Error("Protected path escapes the workspace: " + normalizedPath);
-    }
-    if (!existsSync(candidatePath)) continue;
-
-    const canonicalWorkspacePath = realpathSync(workspacePath);
-    const sourcePath = realpathSync(candidatePath);
-    if (!isInsideWorkspace(canonicalWorkspacePath, sourcePath)) {
-      throw new Error("Protected path resolves outside the workspace: " + normalizedPath);
-    }
-    mounts.push(
-      "--mount",
-      "type=bind,src=" +
-        sourcePath +
-        ",dst=" +
-        path.posix.join("/workspace", normalizedPath) +
-        ",readonly",
-    );
+  for (const writableMount of request.authorityPlan.writableMounts) {
+    mounts.push("--mount", authorityMountArgument(writableMount, false, engineName));
+  }
+  for (const protectedMount of request.authorityPlan.protectedMounts) {
+    mounts.push("--mount", authorityMountArgument(protectedMount, true, engineName));
   }
 
   return mounts;
@@ -116,7 +119,7 @@ export function buildContainerRunArgs(
     "HOME=/tmp",
     "--env",
     "NO_COLOR=1",
-    ...buildWorkspaceMountArgs(request),
+    ...buildWorkspaceMountArgs(request, config.containerEngine),
     "--mount",
     "type=bind,src=" + config.codexHome + ",dst=/codex-home",
     "--workdir",

@@ -53,10 +53,30 @@ export interface ContractPlanner {
   amend(input: ContractAmendmentInput): Promise<ContractAmendment>;
 }
 
+export type ContractPlanningFailureCode =
+  | "rate_limited"
+  | "timeout"
+  | "authentication_failed"
+  | "no_output_text"
+  | "refusal"
+  | "malformed_json"
+  | "schema_invalid"
+  | "path_invalid"
+  | "provider_error";
+
 export class ContractPlanningError extends Error {
-  constructor(message: string) {
+  readonly status: number | null;
+  retryCount = 0;
+  durationMs: number | null = null;
+
+  constructor(
+    message: string,
+    readonly code: ContractPlanningFailureCode = "provider_error",
+    status: number | null = null,
+  ) {
     super(message);
     this.name = "ContractPlanningError";
+    this.status = status;
   }
 }
 
@@ -172,7 +192,7 @@ function buildRequest(
   structuredOutput: boolean,
 ): Record<string, unknown> {
   const request: Record<string, unknown> = {
-    model: config.arkModel,
+    model: config.arkPlannerModel,
     store: false,
     instructions: structuredOutput
       ? instructions
@@ -221,18 +241,33 @@ function extractOutputText(responseBody: string): string {
   try {
     envelope = JSON.parse(responseBody);
   } catch {
-    throw new ContractPlanningError("Planner returned an invalid response envelope");
+    throw new ContractPlanningError(
+      "Planner returned an invalid response envelope",
+      "provider_error",
+    );
   }
   if (!envelope || typeof envelope !== "object") {
-    throw new ContractPlanningError("Planner returned an invalid response envelope");
+    throw new ContractPlanningError(
+      "Planner returned an invalid response envelope",
+      "provider_error",
+    );
   }
   const record = envelope as Record<string, unknown>;
   if (record.status === "incomplete") {
-    throw new ContractPlanningError("Planner response was incomplete");
+    throw new ContractPlanningError(
+      "Planner response was incomplete",
+      "no_output_text",
+    );
+  }
+  if (record.status === "failed" || record.error) {
+    throw new ContractPlanningError("Planner response failed", "provider_error");
   }
   if (typeof record.output_text === "string") return record.output_text;
   if (!Array.isArray(record.output)) {
-    throw new ContractPlanningError("Planner response did not contain contract JSON");
+    throw new ContractPlanningError(
+      "Planner response did not contain contract JSON",
+      "no_output_text",
+    );
   }
 
   const outputText: string[] = [];
@@ -244,7 +279,10 @@ function extractOutputText(responseBody: string): string {
       if (!part || typeof part !== "object") continue;
       const contentPart = part as Record<string, unknown>;
       if (contentPart.type === "refusal") {
-        throw new ContractPlanningError("Planner refused to propose a contract");
+        throw new ContractPlanningError(
+          "Planner refused to propose a contract",
+          "refusal",
+        );
       }
       if (contentPart.type === "output_text" && typeof contentPart.text === "string") {
         outputText.push(contentPart.text);
@@ -252,28 +290,106 @@ function extractOutputText(responseBody: string): string {
     }
   }
   if (outputText.length === 0) {
-    throw new ContractPlanningError("Planner response did not contain contract JSON");
+    throw new ContractPlanningError(
+      "Planner response did not contain contract JSON",
+      "no_output_text",
+    );
   }
   return outputText.join("");
 }
 
 export function parseContractProposal(value: unknown): ContractProposal {
-  const parsed = proposalSchema.parse(value);
-  return {
-    ...parsed,
-    writablePaths: normalizeWritablePaths(parsed.writablePaths),
-    protectedPaths: normalizeProtectedPaths(parsed.protectedPaths),
-  };
+  const result = proposalSchema.safeParse(value);
+  if (!result.success) {
+    throw new ContractPlanningError(
+      "Planner returned an invalid contract schema",
+      "schema_invalid",
+    );
+  }
+  try {
+    return {
+      ...result.data,
+      writablePaths: normalizeWritablePaths(result.data.writablePaths),
+      protectedPaths: normalizeProtectedPaths(result.data.protectedPaths),
+    };
+  } catch {
+    throw new ContractPlanningError(
+      "Planner returned an invalid contract path",
+      "path_invalid",
+    );
+  }
 }
 
 export function parseContractAmendment(value: unknown): ContractAmendment {
-  const parsed = amendmentSchema.parse(value);
-  return {
-    ...parsed,
-    writablePaths: normalizeWritablePaths(parsed.writablePaths),
-    protectedPaths: normalizeProtectedPaths(parsed.protectedPaths),
-    removedProtectedPaths: normalizeProtectedPaths(parsed.removedProtectedPaths),
-  };
+  const result = amendmentSchema.safeParse(value);
+  if (!result.success) {
+    throw new ContractPlanningError(
+      "Planner returned an invalid amendment schema",
+      "schema_invalid",
+    );
+  }
+  try {
+    return {
+      ...result.data,
+      writablePaths: normalizeWritablePaths(result.data.writablePaths),
+      protectedPaths: normalizeProtectedPaths(result.data.protectedPaths),
+      removedProtectedPaths: normalizeProtectedPaths(
+        result.data.removedProtectedPaths,
+      ),
+    };
+  } catch {
+    throw new ContractPlanningError(
+      "Planner returned an invalid amendment path",
+      "path_invalid",
+    );
+  }
+}
+
+const DEFAULT_RATE_LIMIT_DELAY_MS = 300;
+const MAX_RATE_LIMIT_DELAY_MS = 1_000;
+
+function retryAfterDelayMs(value: string | null): number {
+  if (!value) return DEFAULT_RATE_LIMIT_DELAY_MS;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(Math.round(seconds * 1_000), MAX_RATE_LIMIT_DELAY_MS);
+  }
+  const retryAt = Date.parse(value);
+  if (!Number.isFinite(retryAt)) return DEFAULT_RATE_LIMIT_DELAY_MS;
+  return Math.min(Math.max(0, retryAt - Date.now()), MAX_RATE_LIMIT_DELAY_MS);
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (delayMs === 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, delayMs);
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+function httpPlanningError(status: number): ContractPlanningError {
+  if (status === 429) {
+    return new ContractPlanningError(
+      "Planner is temporarily rate limited",
+      "rate_limited",
+      status,
+    );
+  }
+  if (status === 401 || status === 403) {
+    return new ContractPlanningError(
+      "Planner authentication failed",
+      "authentication_failed",
+      status,
+    );
+  }
+  return new ContractPlanningError("Planner request failed", "provider_error", status);
 }
 
 export class ArkContractPlanner implements ContractPlanner {
@@ -309,37 +425,42 @@ export class ArkContractPlanner implements ContractPlanner {
     schema: Record<string, unknown>,
     parse: (value: unknown) => T,
   ): Promise<T> {
+    const startedAt = Date.now();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.plannerTimeoutMs);
+    let rateLimitRetries = 0;
+    let compatibilityRetries = 0;
     try {
-      const firstAttempt = await this.request(
-        instructions,
-        userInput,
-        schemaName,
-        schema,
-        true,
-        controller.signal,
-      );
+      let structuredOutput = true;
       let successfulBody: string;
-      if (firstAttempt.ok) {
-        successfulBody = firstAttempt.body;
-      } else if (
-        isStructuredOutputUnsupported(firstAttempt.status, firstAttempt.body)
-      ) {
-        const compatibilityAttempt = await this.request(
+      while (true) {
+        const attempt = await this.request(
           instructions,
           userInput,
           schemaName,
           schema,
-          false,
+          structuredOutput,
           controller.signal,
         );
-        if (!compatibilityAttempt.ok) {
-          throw new ContractPlanningError("Planner compatibility request failed");
+        if (attempt.ok) {
+          successfulBody = attempt.body;
+          break;
         }
-        successfulBody = compatibilityAttempt.body;
-      } else {
-        throw new ContractPlanningError("Planner request failed");
+        if (attempt.status === 429 && rateLimitRetries === 0) {
+          rateLimitRetries += 1;
+          await waitForRetry(attempt.retryAfterMs, controller.signal);
+          continue;
+        }
+        if (
+          structuredOutput &&
+          compatibilityRetries === 0 &&
+          isStructuredOutputUnsupported(attempt.status, attempt.body)
+        ) {
+          compatibilityRetries += 1;
+          structuredOutput = false;
+          continue;
+        }
+        throw httpPlanningError(attempt.status);
       }
 
       const outputText = extractOutputText(successfulBody);
@@ -347,19 +468,30 @@ export class ArkContractPlanner implements ContractPlanner {
       try {
         proposal = JSON.parse(outputText);
       } catch {
-        throw new ContractPlanningError("Planner returned malformed contract JSON");
+        throw new ContractPlanningError(
+          "Planner returned malformed contract JSON",
+          "malformed_json",
+        );
       }
-      try {
-        return parse(proposal);
-      } catch {
-        throw new ContractPlanningError("Planner returned an invalid contract");
-      }
+      return parse(proposal);
     } catch (error) {
-      if (error instanceof ContractPlanningError) throw error;
+      let planningError: ContractPlanningError;
       if (controller.signal.aborted) {
-        throw new ContractPlanningError("Planner request timed out");
+        planningError = new ContractPlanningError(
+          "Planner request timed out",
+          "timeout",
+        );
+      } else if (error instanceof ContractPlanningError) {
+        planningError = error;
+      } else {
+        planningError = new ContractPlanningError(
+          "Planner request failed",
+          "provider_error",
+        );
       }
-      throw new ContractPlanningError("Planner request failed");
+      planningError.retryCount = rateLimitRetries + compatibilityRetries;
+      planningError.durationMs = Date.now() - startedAt;
+      throw planningError;
     } finally {
       clearTimeout(timeout);
     }
@@ -372,7 +504,7 @@ export class ArkContractPlanner implements ContractPlanner {
     schema: Record<string, unknown>,
     structuredOutput: boolean,
     signal: AbortSignal,
-  ): Promise<{ ok: boolean; status: number; body: string }> {
+  ): Promise<{ ok: boolean; status: number; body: string; retryAfterMs: number }> {
     const response = await this.fetchImplementation(
       this.config.arkBaseUrl + "/responses",
       {
@@ -398,6 +530,7 @@ export class ArkContractPlanner implements ContractPlanner {
       ok: response.ok,
       status: response.status,
       body: (await response.text()).slice(0, 1_000_000),
+      retryAfterMs: retryAfterDelayMs(response.headers.get("retry-after")),
     };
   }
 }

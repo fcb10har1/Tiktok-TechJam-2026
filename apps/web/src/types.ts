@@ -7,6 +7,17 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
+export type ContractPlanningFailureCode =
+  | "rate_limited"
+  | "timeout"
+  | "authentication_failed"
+  | "no_output_text"
+  | "refusal"
+  | "malformed_json"
+  | "schema_invalid"
+  | "path_invalid"
+  | "provider_error";
+
 export interface Agent {
   id: string;
   name: string;
@@ -68,6 +79,12 @@ export interface AgentRun {
   completedAt: string | null;
   createdAt: string;
   executionContract?: ExecutionContract;
+  authorityPreparations?: Array<{
+    path: string;
+    kind: "file" | "directory";
+    purpose: "writable" | "protected";
+    existedBeforeRun: false;
+  }>;
 }
 
 export interface SystemInfo {

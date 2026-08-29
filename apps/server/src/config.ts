@@ -40,11 +40,17 @@ const envSchema = z.object({
     .optional(),
   ARK_API_KEY: z.string().optional(),
   ARK_MODEL: z.string().optional(),
+  ARK_PLANNER_MODEL: z.string().optional(),
   ARK_BASE_URL: z
     .string()
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
-  PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  ARK_PLANNER_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(60_000)
+    .default(30_000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
@@ -87,8 +93,10 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     authToken,
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
+    arkPlannerModel:
+      env.ARK_PLANNER_MODEL?.trim() || env.ARK_MODEL?.trim() || "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
-    plannerTimeoutMs: env.PLANNER_TIMEOUT_MS,
+    plannerTimeoutMs: env.ARK_PLANNER_TIMEOUT_MS,
     nodeEnv: env.NODE_ENV,
   };
 }

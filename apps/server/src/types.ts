@@ -73,6 +73,28 @@ export interface AgentRun {
   completedAt: string | null;
   createdAt: string;
   executionContract?: ExecutionContract;
+  authorityPreparations?: AuthorityPreparation[];
+}
+
+export type AuthorityTargetKind = "file" | "directory";
+
+export interface AuthorityPreparation {
+  path: string;
+  kind: AuthorityTargetKind;
+  purpose: "writable" | "protected";
+  existedBeforeRun: false;
+}
+
+export interface AuthorityMount {
+  path: string;
+  sourcePath: string;
+  kind: AuthorityTargetKind;
+}
+
+export interface WorkspaceAuthorityPlan {
+  workspaceSourcePath: string;
+  writableMounts: AuthorityMount[];
+  protectedMounts: AuthorityMount[];
 }
 
 export interface Database {
@@ -105,7 +127,9 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  writablePaths: readonly string[];
   protectedPaths: readonly string[];
+  authorityPlan: WorkspaceAuthorityPlan;
 }
 
 export interface AgentRunner {

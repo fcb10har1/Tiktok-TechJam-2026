@@ -6,6 +6,7 @@ import {
   parseContractAmendment,
   parseContractProposal,
   type ContractAmendment,
+  type ContractPlanningFailureCode,
   type ContractPlanner,
   type ContractProposal,
 } from "./contract-planner.js";
@@ -14,6 +15,7 @@ import {
   DEFAULT_PROTECTED_PATHS,
   InvalidProtectedPathError,
   normalizeProtectedPaths,
+  normalizeWritablePaths,
 } from "./protected-paths.js";
 import { JsonStore } from "./store.js";
 import type {
@@ -27,12 +29,73 @@ import type {
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
+import {
+  compileWorkspaceAuthority,
+  prepareWorkspaceAuthority,
+  validateWorkspaceAuthorityDraft,
+  WorkspaceAuthorityError,
+} from "./workspace-authority.js";
 
 const now = () => new Date().toISOString();
 export const AI_PROPOSAL_UNAVAILABLE_NOTICE =
-  "AI proposal unavailable — review contract manually.";
+  "AI proposal unavailable — configure authority manually or retry AI proposal.";
 export const NEGOTIATION_PRESERVED_NOTICE =
   "Unable to apply negotiation — current contract was preserved.";
+
+export interface ExecutionContractUpdate {
+  protectedPaths?: readonly string[] | undefined;
+  writablePaths?: readonly string[] | undefined;
+}
+
+export interface ContractProposalRetryResult {
+  run: AgentRun;
+  applied: boolean;
+  notice: string | null;
+  failureCode: ContractPlanningFailureCode | null;
+}
+
+export interface PlannerDiagnostic {
+  operation: "proposal" | "retry" | "negotiation";
+  code: ContractPlanningFailureCode;
+  status: number | null;
+  model: string;
+  durationMs: number | null;
+  retryCount: number;
+}
+
+type PlannerDiagnosticLogger = (diagnostic: PlannerDiagnostic) => void;
+
+const failureDescription: Record<ContractPlanningFailureCode, string> = {
+  rate_limited: "temporarily rate limited",
+  timeout: "the request timed out",
+  authentication_failed: "planner authentication failed",
+  no_output_text: "no usable proposal was returned",
+  refusal: "the planner declined the request",
+  malformed_json: "the response was not valid JSON",
+  schema_invalid: "the proposal failed schema validation",
+  path_invalid: "the proposal contained an invalid workspace path",
+  provider_error: "the provider request failed",
+};
+
+function planningError(error: unknown): ContractPlanningError {
+  return error instanceof ContractPlanningError
+    ? error
+    : new ContractPlanningError("Planner request failed", "provider_error");
+}
+
+function proposalUnavailableNotice(
+  error: ContractPlanningError,
+  currentContractPreserved: boolean,
+): string {
+  return (
+    "AI proposal unavailable: " +
+    failureDescription[error.code] +
+    ". " +
+    (currentContractPreserved
+      ? "Your current contract was preserved."
+      : "Configure authority manually or retry AI proposal.")
+  );
+}
 
 export interface ContractNegotiationResult {
   run: AgentRun;
@@ -59,6 +122,7 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly planner: ContractPlanner = unavailablePlanner,
+    private readonly logPlannerDiagnostic: PlannerDiagnosticLogger = () => undefined,
   ) {}
 
   async initialize(): Promise<void> {
@@ -208,27 +272,12 @@ export class AgentService {
     }
 
     let proposal: ContractProposal | null = null;
+    let proposalFailure: ContractPlanningError | null = null;
     try {
-      const workspaceInventory = await this.workspaces.readInventory(
-        agentForPlanning.workspacePath,
-      );
-      const validatedProposal = parseContractProposal(
-        await this.planner.propose({
-          task: prompt,
-          agentInstructions: agentForPlanning.instructions,
-          workspaceInventory,
-        }),
-      );
-      proposal = {
-        ...validatedProposal,
-        protectedPaths: normalizeProtectedPaths([
-          ...new Set([
-            ...DEFAULT_PROTECTED_PATHS,
-            ...validatedProposal.protectedPaths,
-          ]),
-        ]),
-      };
-    } catch {
+      proposal = await this.generateContractProposal(agentForPlanning, prompt);
+    } catch (error) {
+      proposalFailure = planningError(error);
+      this.reportPlannerFailure("proposal", proposalFailure);
       proposal = null;
     }
 
@@ -245,7 +294,12 @@ export class AgentService {
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
-      executionContract: this.buildExecutionContract(prompt, proposal, timestamp),
+      executionContract: this.buildExecutionContract(
+        prompt,
+        proposal,
+        proposalFailure,
+        timestamp,
+      ),
     };
     const message: Message = {
       id: randomUUID(),
@@ -277,28 +331,129 @@ export class AgentService {
 
   async updateExecutionContract(
     runId: string,
-    protectedPaths: readonly string[],
+    update: ExecutionContractUpdate,
   ): Promise<AgentRun> {
-    let normalizedPaths: string[];
     try {
-      normalizedPaths = normalizeProtectedPaths(protectedPaths);
+      return await this.store.mutate((database) => {
+        const run = database.runs.find((item) => item.id === runId);
+        if (!run) throw new HttpError(404, "Run not found");
+        if (run.status !== "awaiting_approval" || !run.executionContract) {
+          throw new HttpError(409, "Execution Contract can no longer be edited");
+        }
+        if (update.writablePaths !== undefined && run.executionContract.version !== 1) {
+          throw new HttpError(409, "Legacy V0 contracts have no writable authority");
+        }
+        const agent = database.agents.find((item) => item.id === run.agentId);
+        if (!agent) throw new HttpError(404, "Agent not found");
+        const authority = validateWorkspaceAuthorityDraft({
+          workspacePath: agent.workspacePath,
+          writablePaths:
+            update.writablePaths ??
+            (run.executionContract.version === 1
+              ? run.executionContract.writablePaths
+              : []),
+          protectedPaths:
+            update.protectedPaths ?? run.executionContract.protectedPaths,
+        });
+        run.executionContract.protectedPaths = authority.protectedPaths;
+        if (run.executionContract.version === 1) {
+          run.executionContract.writablePaths = authority.writablePaths;
+        }
+        run.executionContract.updatedAt = now();
+        return structuredClone(run);
+      });
     } catch (error) {
-      if (error instanceof InvalidProtectedPathError) {
+      if (
+        error instanceof InvalidProtectedPathError ||
+        error instanceof WorkspaceAuthorityError
+      ) {
         throw new HttpError(400, error.message);
       }
       throw error;
     }
+  }
 
-    return this.store.mutate((database) => {
-      const run = database.runs.find((item) => item.id === runId);
-      if (!run) throw new HttpError(404, "Run not found");
-      if (run.status !== "awaiting_approval" || !run.executionContract) {
-        throw new HttpError(409, "Execution Contract can no longer be edited");
+  async retryExecutionContractProposal(
+    runId: string,
+  ): Promise<ContractProposalRetryResult> {
+    const runAtStart = this.getRun(runId);
+    if (
+      runAtStart.status !== "awaiting_approval" ||
+      runAtStart.executionContract?.version !== 1 ||
+      runAtStart.executionContract.proposalSource !== "fallback"
+    ) {
+      throw new HttpError(
+        409,
+        "Only a fallback V1 contract awaiting approval can retry its AI proposal",
+      );
+    }
+    const contractAtStart = structuredClone(runAtStart.executionContract);
+    const serializedContractAtStart = JSON.stringify(contractAtStart);
+    const agent = this.getAgent(runAtStart.agentId);
+
+    let proposal: ContractProposal;
+    try {
+      proposal = await this.generateContractProposal(agent, runAtStart.prompt);
+    } catch (error) {
+      const failure = planningError(error);
+      this.reportPlannerFailure("retry", failure);
+      const preservedRun = await this.store.mutate((database) => {
+        const storedRun = database.runs.find((item) => item.id === runId);
+        if (
+          !storedRun ||
+          storedRun.status !== "awaiting_approval" ||
+          storedRun.executionContract?.version !== 1
+        ) {
+          throw new HttpError(409, "Run is no longer awaiting proposal retry");
+        }
+        if (
+          JSON.stringify(storedRun.executionContract) !== serializedContractAtStart
+        ) {
+          throw new HttpError(
+            409,
+            "Execution Contract changed while proposal retry was in progress",
+          );
+        }
+        return structuredClone(storedRun);
+      });
+      return {
+        run: preservedRun,
+        applied: false,
+        notice: proposalUnavailableNotice(failure, true),
+        failureCode: failure.code,
+      };
+    }
+
+    const updatedAt = now();
+    const run = await this.store.mutate((database) => {
+      const storedRun = database.runs.find((item) => item.id === runId);
+      if (
+        !storedRun ||
+        storedRun.status !== "awaiting_approval" ||
+        storedRun.executionContract?.version !== 1 ||
+        storedRun.executionContract.proposalSource !== "fallback"
+      ) {
+        throw new HttpError(409, "Run is no longer awaiting proposal retry");
       }
-      run.executionContract.protectedPaths = normalizedPaths;
-      run.executionContract.updatedAt = now();
-      return structuredClone(run);
+      if (JSON.stringify(storedRun.executionContract) !== serializedContractAtStart) {
+        throw new HttpError(
+          409,
+          "Execution Contract changed while proposal retry was in progress",
+        );
+      }
+      Object.assign(storedRun.executionContract, proposal, {
+        protectedPaths: normalizeProtectedPaths([
+          ...contractAtStart.protectedPaths,
+          ...proposal.protectedPaths,
+        ]),
+        proposalSource: "ai",
+        proposalNotice: null,
+        approvedAt: null,
+        updatedAt,
+      } satisfies Partial<ExecutionContractV1>);
+      return structuredClone(storedRun);
     });
+    return { run, applied: true, notice: null, failureCode: null };
   }
 
   async negotiateExecutionContract(
@@ -373,7 +528,8 @@ export class AgentService {
           (protectedPath) => !removals.has(protectedPath),
         ),
       ]);
-    } catch {
+    } catch (error) {
+      this.reportPlannerFailure("negotiation", planningError(error));
       return preserveCurrentContract();
     }
     const { removedProtectedPaths: _removedProtectedPaths, ...revisedProposal } =
@@ -416,29 +572,53 @@ export class AgentService {
       );
     }
     const approvedAt = now();
-    const approved = await this.store.mutate((database) => {
-      const run = database.runs.find((item) => item.id === runId);
-      if (!run) throw new HttpError(404, "Run not found");
-      if (run.status !== "awaiting_approval" || !run.executionContract) {
-        throw new HttpError(409, "Run is not awaiting approval");
-      }
-      const agent = database.agents.find((item) => item.id === run.agentId);
-      if (!agent) throw new HttpError(404, "Agent not found");
-      if (agent.status === "stopped") {
-        throw new HttpError(409, "Start the Agent before approving this Run");
-      }
+    let approved: { run: AgentRun; agent: Agent };
+    try {
+      approved = await this.store.mutate((database) => {
+        const run = database.runs.find((item) => item.id === runId);
+        if (!run) throw new HttpError(404, "Run not found");
+        if (run.status !== "awaiting_approval" || !run.executionContract) {
+          throw new HttpError(409, "Run is not awaiting approval");
+        }
+        if (run.executionContract.version !== 1) {
+          throw new HttpError(
+            409,
+            "Legacy V0 contracts have no writable authority; cancel and resubmit this Run",
+          );
+        }
+        const agent = database.agents.find((item) => item.id === run.agentId);
+        if (!agent) throw new HttpError(404, "Agent not found");
+        if (agent.status === "stopped") {
+          throw new HttpError(409, "Start the Agent before approving this Run");
+        }
 
-      run.executionContract.protectedPaths = normalizeProtectedPaths(
-        run.executionContract.protectedPaths,
-      );
-      run.executionContract.approvedAt = approvedAt;
-      run.executionContract.updatedAt = approvedAt;
-      run.status = "queued";
-      agent.status = "busy";
-      agent.lastError = null;
-      agent.updatedAt = approvedAt;
-      return { run: structuredClone(run), agent: structuredClone(agent) };
-    });
+        const authority = prepareWorkspaceAuthority({
+          workspacePath: agent.workspacePath,
+          writablePaths: normalizeWritablePaths(run.executionContract.writablePaths),
+          protectedPaths: normalizeProtectedPaths(
+            run.executionContract.protectedPaths,
+          ),
+        });
+        run.executionContract.writablePaths = authority.writablePaths;
+        run.executionContract.protectedPaths = authority.protectedPaths;
+        run.executionContract.approvedAt = approvedAt;
+        run.executionContract.updatedAt = approvedAt;
+        run.authorityPreparations = authority.preparations;
+        run.status = "queued";
+        agent.status = "busy";
+        agent.lastError = null;
+        agent.updatedAt = approvedAt;
+        return { run: structuredClone(run), agent: structuredClone(agent) };
+      });
+    } catch (error) {
+      if (
+        error instanceof InvalidProtectedPathError ||
+        error instanceof WorkspaceAuthorityError
+      ) {
+        throw new HttpError(400, error.message);
+      }
+      throw error;
+    }
     this.scheduleExecution(approved.agent, approved.run.id);
     return approved.run;
   }
@@ -498,6 +678,7 @@ export class AgentService {
   private buildExecutionContract(
     prompt: string,
     proposal: ContractProposal | null,
+    proposalFailure: ContractPlanningError | null,
     timestamp: string,
   ): ExecutionContract {
     if (!proposal) {
@@ -514,7 +695,9 @@ export class AgentService {
         riskLevel: "medium",
         rationale: null,
         proposalSource: "fallback",
-        proposalNotice: AI_PROPOSAL_UNAVAILABLE_NOTICE,
+        proposalNotice: proposalFailure
+          ? proposalUnavailableNotice(proposalFailure, false)
+          : AI_PROPOSAL_UNAVAILABLE_NOTICE,
         approvedAt: null,
         updatedAt: timestamp,
       };
@@ -528,6 +711,54 @@ export class AgentService {
       approvedAt: null,
       updatedAt: timestamp,
     };
+  }
+
+  private async generateContractProposal(
+    agent: Agent,
+    prompt: string,
+  ): Promise<ContractProposal> {
+    const workspaceInventory = await this.workspaces.readInventory(
+      agent.workspacePath,
+    );
+    const proposal = parseContractProposal(
+      await this.planner.propose({
+        task: prompt,
+        agentInstructions: agent.instructions,
+        workspaceInventory,
+      }),
+    );
+    try {
+      return {
+        ...proposal,
+        protectedPaths: normalizeProtectedPaths([
+          ...DEFAULT_PROTECTED_PATHS,
+          ...proposal.protectedPaths,
+        ]),
+      };
+    } catch {
+      throw new ContractPlanningError(
+        "Planner proposal exceeded safe path limits",
+        "path_invalid",
+      );
+    }
+  }
+
+  private reportPlannerFailure(
+    operation: PlannerDiagnostic["operation"],
+    error: ContractPlanningError,
+  ): void {
+    try {
+      this.logPlannerDiagnostic({
+        operation,
+        code: error.code,
+        status: error.status,
+        model: this.config.arkPlannerModel,
+        durationMs: error.durationMs,
+        retryCount: error.retryCount,
+      });
+    } catch {
+      // Diagnostics must never alter the contract lifecycle.
+    }
   }
 
   private async executeRun(agentAtStart: Agent, runId: string): Promise<void> {
@@ -548,12 +779,22 @@ export class AgentService {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
+      if (run.executionContract?.version !== 1) {
+        throw new Error("Run cannot execute without V1 writable authority");
+      }
+      const authorityPlan = compileWorkspaceAuthority({
+        workspacePath: agentAtStart.workspacePath,
+        writablePaths: run.executionContract.writablePaths,
+        protectedPaths: run.executionContract.protectedPaths,
+      });
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
         prompt: run.prompt,
         threadId: agentAtStart.codexThreadId,
-        protectedPaths: run.executionContract!.protectedPaths,
+        writablePaths: run.executionContract.writablePaths,
+        protectedPaths: run.executionContract.protectedPaths,
+        authorityPlan,
       });
       const completedAt = now();
       await this.store.mutate((database) => {

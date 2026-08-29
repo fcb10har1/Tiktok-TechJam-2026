@@ -10,25 +10,63 @@ export class InvalidProtectedPathError extends Error {
 }
 
 export function normalizeProtectedPaths(paths: readonly string[]): string[] {
-  const normalizedPaths = normalizeWorkspacePaths(paths, "Protected", true);
+  const byRoot = new Map<string, string>();
+  for (const normalizedPath of normalizeWorkspacePaths(paths, "Protected")) {
+    const root = workspaceScopeRoot(normalizedPath);
+    const existing = byRoot.get(root);
+    if (!existing || (isDirectoryScope(normalizedPath) && !isDirectoryScope(existing))) {
+      byRoot.set(root, normalizedPath);
+    }
+  }
+  const normalizedPaths = [...byRoot.values()];
   return normalizedPaths.filter(
     (candidatePath) =>
       !normalizedPaths.some(
         (parentPath) =>
-          parentPath !== candidatePath &&
-          candidatePath.startsWith(parentPath + "/"),
+          workspaceScopeRoot(parentPath) !== workspaceScopeRoot(candidatePath) &&
+          isPathInsideScope(candidatePath, parentPath),
       ),
   );
 }
 
 export function normalizeWritablePaths(paths: readonly string[]): string[] {
-  return normalizeWorkspacePaths(paths, "Writable", false);
+  const byRoot = new Map<string, string>();
+  for (const normalizedPath of normalizeWorkspacePaths(paths, "Writable")) {
+    const root = workspaceScopeRoot(normalizedPath);
+    const existing = byRoot.get(root);
+    if (!existing || (isDirectoryScope(normalizedPath) && !isDirectoryScope(existing))) {
+      byRoot.set(root, normalizedPath);
+    }
+  }
+  const normalizedPaths = [...byRoot.values()];
+  return normalizedPaths.filter(
+    (candidatePath) =>
+      !normalizedPaths.some(
+        (parentPath) =>
+          parentPath !== candidatePath &&
+          isDirectoryScope(parentPath) &&
+          isPathInsideScope(candidatePath, parentPath),
+      ),
+  );
+}
+
+export function isDirectoryScope(workspacePath: string): boolean {
+  return workspacePath.endsWith("/**");
+}
+
+export function workspaceScopeRoot(workspacePath: string): string {
+  return isDirectoryScope(workspacePath) ? workspacePath.slice(0, -3) : workspacePath;
+}
+
+export function isPathInsideScope(candidatePath: string, scopePath: string): boolean {
+  const candidateRoot = workspaceScopeRoot(candidatePath);
+  const scopeRoot = workspaceScopeRoot(scopePath);
+  return candidateRoot === scopeRoot || candidateRoot.startsWith(scopeRoot + "/");
 }
 
 function normalizeWorkspacePaths(
   paths: readonly string[],
   pathKind: "Protected" | "Writable",
-  canonicalizeProtectedPath: boolean,
 ): string[] {
   if (paths.length > 100) {
     throw new InvalidProtectedPathError(
@@ -39,38 +77,48 @@ function normalizeWorkspacePaths(
   const normalizedPaths: string[] = [];
   const seen = new Set<string>();
   for (const rawPath of paths) {
-    const protectedPath = rawPath.trim();
-    if (!protectedPath || protectedPath.length > 512) {
+    const workspacePath = rawPath.trim();
+    if (!workspacePath || workspacePath.length > 512) {
       throw new InvalidProtectedPathError(
         pathKind + " paths must contain between 1 and 512 characters",
       );
     }
+    const directoryScope =
+      workspacePath.endsWith("/**") ||
+      (pathKind === "Writable" && workspacePath.endsWith("/"));
+    const pathWithoutScope = workspacePath.endsWith("/**")
+      ? workspacePath.slice(0, -3)
+      : workspacePath;
     if (
-      path.posix.isAbsolute(protectedPath) ||
-      protectedPath.includes("\\") ||
-      protectedPath.includes(",") ||
-      protectedPath.split("/").includes("..")
+      path.posix.isAbsolute(pathWithoutScope) ||
+      pathWithoutScope.includes("\\") ||
+      pathWithoutScope.includes(",") ||
+      /[\u0000-\u001f\u007f]/.test(pathWithoutScope) ||
+      pathWithoutScope.split("/").includes("..")
     ) {
       throw new InvalidProtectedPathError(
         pathKind +
           " path must be a workspace-relative POSIX path: " +
-          protectedPath,
+          workspacePath,
+      );
+    }
+    if (/[*?[\]{}]/.test(pathWithoutScope)) {
+      throw new InvalidProtectedPathError(
+        pathKind +
+          " path contains unsupported glob syntax; only a terminal /** is allowed: " +
+          workspacePath,
       );
     }
 
-    const normalizedPath = canonicalizeProtectedPath
-      ? path.posix.normalize(protectedPath).replace(/\/+$/, "")
-      : path.posix.normalize(protectedPath);
-    if (normalizedPath === "." || normalizedPath.startsWith("../")) {
+    const normalizedRoot = path.posix.normalize(pathWithoutScope).replace(/\/+$/, "");
+    if (normalizedRoot === "." || normalizedRoot.startsWith("../")) {
       throw new InvalidProtectedPathError(
-        pathKind + " path escapes the workspace: " + protectedPath,
+        pathKind + " path escapes the workspace: " + workspacePath,
       );
     }
+    const normalizedPath = normalizedRoot + (directoryScope ? "/**" : "");
     if (seen.has(normalizedPath)) {
-      if (canonicalizeProtectedPath) continue;
-      throw new InvalidProtectedPathError(
-        "Duplicate " + pathKind.toLowerCase() + " path: " + normalizedPath,
-      );
+      continue;
     }
     seen.add(normalizedPath);
     normalizedPaths.push(normalizedPath);

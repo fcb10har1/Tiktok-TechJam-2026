@@ -114,6 +114,57 @@ For restricted networks, configure:
 Resource limits are controlled by `CONTAINER_CPU_LIMIT`,
 `CONTAINER_MEMORY_LIMIT`, and `CONTAINER_PIDS_LIMIT`.
 
+## Runtime write authority
+
+For approved V1 Execution Contracts, the local container mounts the Agent
+workspace read-only and adds read-write bind mounts only for the approved
+`writablePaths`. Explicit `protectedPaths` are mounted read-only last, so the
+precedence is:
+
+```text
+protected paths > writable paths > default read-only
+```
+
+A terminal `/**` denotes a directory subtree. For example, `src/**` authorizes
+creation, modification, rename, and deletion below `src`, while unrelated root
+files remain read-only. Existing directory paths are also treated as subtree
+scopes. If an approved `/**` root is absent, the trusted control plane creates
+that exact directory before launch. An absent exact path such as `package.json`
+is prepared as an empty file and mounted individually; its siblings remain
+read-only. Every prepared target is recorded on the Run with
+`existedBeforeRun: false`.
+For a missing nested target, its parent directory must already exist; the
+control plane never creates or grants an unapproved parent scope implicitly.
+
+A missing protected descendant inside a writable directory is prepared using
+the same explicit syntax—`path/**` for a directory or an exact path for a
+file—then overlaid read-only. Missing protected paths outside writable authority
+need no placeholder because their parent is already read-only.
+
+Exact-file mounts support ordinary direct writes and truncation. Tools that save
+by creating a sibling temporary file and renaming it over the mounted file can
+fail with `EBUSY` because the file itself is a bind-mount point. Prefer directory
+scopes for normal app-building work. A future production design can use a
+staging workspace or OverlayFS for transparent atomic replacement and
+transactional commits; this POC intentionally does not provide staging or
+rollback.
+
+The guarantee applies to the container's `/workspace` tree. It does not claim
+equivalent enforcement for the local-process Runtime, host administrators, or
+other host processes with direct access to the workspace.
+
+The ordinary test suite skips the Docker probe. Run it mandatorily with:
+
+```bash
+AGENTGUARD_CONTAINER_INTEGRATION=1 \
+AGENTGUARD_RUNTIME_IMAGE=volc-agent-runtime:local \
+npm run test -w @launchpad/server -- \
+src/container-codex-runner.integration.test.ts
+```
+
+With the integration flag set, an unavailable Runtime or a failed enforcement
+assertion fails the test instead of skipping it.
+
 ## Troubleshooting
 
 Check Runtime readiness:

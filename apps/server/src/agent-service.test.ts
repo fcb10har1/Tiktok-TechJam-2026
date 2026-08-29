@@ -1,8 +1,8 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentService } from "./agent-service.js";
+import { AgentService, type PlannerDiagnostic } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import type {
   ContractAmendment,
@@ -11,6 +11,7 @@ import type {
   ContractPlanningInput,
   ContractProposal,
 } from "./contract-planner.js";
+import { ContractPlanningError } from "./contract-planner.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -37,7 +38,7 @@ class FakeRunner implements AgentRunner {
 const basicProposal: ContractProposal = {
   goal: "Complete the requested task",
   plannedActions: ["Inspect the relevant files", "Make the requested change", "Run tests"],
-  writablePaths: ["src"],
+  writablePaths: ["src/**"],
   protectedPaths: [],
   riskLevel: "low",
   rationale: "The proposed change is limited to source files.",
@@ -48,14 +49,19 @@ class FakePlanner implements ContractPlanner {
   readonly amendmentCalls: ContractAmendmentInput[] = [];
 
   constructor(
-    private readonly result: ContractProposal | Error = basicProposal,
+    private readonly result:
+      | ContractProposal
+      | Error
+      | Array<ContractProposal | Error> = basicProposal,
     private readonly amendmentResults: Array<ContractAmendment | Error> = [],
   ) {}
 
   async propose(input: ContractPlanningInput): Promise<ContractProposal> {
     this.calls.push(structuredClone(input));
-    if (this.result instanceof Error) throw this.result;
-    return structuredClone(this.result);
+    const result = Array.isArray(this.result) ? this.result.shift() : this.result;
+    if (!result) throw new Error("No fake proposal was configured");
+    if (result instanceof Error) throw result;
+    return structuredClone(result);
   }
 
   async amend(input: ContractAmendmentInput): Promise<ContractAmendment> {
@@ -82,6 +88,7 @@ async function makeService(
   runner: AgentRunner = new FakeRunner(),
   environment: NodeJS.ProcessEnv = {},
   planner: ContractPlanner = new FakePlanner(),
+  diagnosticLogger: (diagnostic: PlannerDiagnostic) => void = () => undefined,
 ): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
@@ -101,6 +108,7 @@ async function makeService(
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
     planner,
+    diagnosticLogger,
   );
   await service.initialize();
   return service;
@@ -130,7 +138,7 @@ describe("Agent lifecycle", () => {
       version: 1,
       proposalSource: "ai",
       goal: "Complete the requested task",
-      writablePaths: ["src"],
+      writablePaths: ["src/**"],
       riskLevel: "low",
     });
     expect(run.executionContract?.protectedPaths).toEqual([".env", "deployment"]);
@@ -142,6 +150,17 @@ describe("Agent lifecycle", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages[1]?.content).toContain("write hello world");
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
+    expect(runner.calls[0]?.writablePaths).toEqual(["src/**"]);
+    expect(runner.calls[0]?.authorityPlan.writableMounts.map((mount) => mount.path))
+      .toEqual(["src"]);
+    expect(service.getRun(run.id).authorityPreparations).toEqual([
+      {
+        path: "src",
+        kind: "directory",
+        purpose: "writable",
+        existedBeforeRun: false,
+      },
+    ]);
   });
 
   it("triggers preflight planning and persists a validated AI proposal", async () => {
@@ -206,7 +225,8 @@ describe("Agent lifecycle", () => {
         protectedPaths: [".env", "deployment"],
         riskLevel: "medium",
         proposalSource: "fallback",
-        proposalNotice: "AI proposal unavailable — review contract manually.",
+        proposalNotice:
+          "AI proposal unavailable: the provider request failed. Configure authority manually or retry AI proposal.",
         approvedAt: null,
       },
     });
@@ -214,6 +234,195 @@ describe("Agent lifecycle", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(runner.calls).toHaveLength(0);
     await service.cancelRun(run.id);
+  });
+
+  it("retries a fallback proposal without executing and preserves human protections", async () => {
+    const runner = new FakeRunner();
+    const diagnostics: PlannerDiagnostic[] = [];
+    const planner = new FakePlanner([
+      new ContractPlanningError(
+        "Planner is temporarily rate limited",
+        "rate_limited",
+        429,
+      ),
+      {
+        ...basicProposal,
+        writablePaths: ["src/**"],
+        protectedPaths: ["secrets/**"],
+      },
+    ]);
+    const service = await makeService(runner, {}, planner, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+    const agent = await service.createAgent({ name: "Retry proposal" });
+    const { run } = await service.sendMessage(agent.id, "Update source");
+    await service.updateExecutionContract(run.id, {
+      protectedPaths: [
+        ...(run.executionContract?.protectedPaths ?? []),
+        "package.json",
+      ],
+    });
+
+    const result = await service.retryExecutionContractProposal(run.id);
+
+    expect(result).toMatchObject({
+      applied: true,
+      notice: null,
+      failureCode: null,
+      run: {
+        status: "awaiting_approval",
+        executionContract: {
+          proposalSource: "ai",
+          writablePaths: ["src/**"],
+          protectedPaths: [".env", "deployment", "package.json", "secrets/**"],
+          proposalNotice: null,
+          approvedAt: null,
+        },
+      },
+    });
+    expect(planner.calls).toHaveLength(2);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        operation: "proposal",
+        code: "rate_limited",
+        status: 429,
+      }),
+    ]);
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
+  it("keeps a failed retry byte-for-byte unchanged and returns a safe notice", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner([
+      new ContractPlanningError("Rate limited", "rate_limited", 429),
+      new ContractPlanningError("Raw secret provider message", "rate_limited", 429),
+    ]);
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Preserved retry" });
+    const { run } = await service.sendMessage(agent.id, "Update source");
+    const contractBefore = JSON.stringify(service.getRun(run.id).executionContract);
+
+    const result = await service.retryExecutionContractProposal(run.id);
+
+    expect(result).toMatchObject({
+      applied: false,
+      failureCode: "rate_limited",
+      notice:
+        "AI proposal unavailable: temporarily rate limited. Your current contract was preserved.",
+      run: { status: "awaiting_approval" },
+    });
+    expect(JSON.stringify(service.getRun(run.id).executionContract)).toBe(
+      contractBefore,
+    );
+    expect(result.notice).not.toContain("Raw secret");
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
+  it("rejects a stale proposal retry instead of overwriting a manual edit", async () => {
+    let releaseRetry!: (proposal: ContractProposal) => void;
+    let proposalCall = 0;
+    const planner: ContractPlanner = {
+      async propose() {
+        proposalCall += 1;
+        if (proposalCall === 1) {
+          throw new ContractPlanningError("Unavailable", "provider_error");
+        }
+        return new Promise<ContractProposal>((resolve) => {
+          releaseRetry = resolve;
+        });
+      },
+      async amend() {
+        throw new Error("Not used");
+      },
+    };
+    const runner = new FakeRunner();
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Stale retry" });
+    const { run } = await service.sendMessage(agent.id, "Update source");
+
+    const retry = service.retryExecutionContractProposal(run.id);
+    await expect.poll(() => proposalCall).toBe(2);
+    await service.updateExecutionContract(run.id, {
+      protectedPaths: [".env", "deployment", "package.json"],
+    });
+    releaseRetry(basicProposal);
+
+    await expect(retry).rejects.toMatchObject({ statusCode: 409 });
+    expect(service.getRun(run.id).executionContract?.protectedPaths).toEqual([
+      ".env",
+      "deployment",
+      "package.json",
+    ]);
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
+  it("rejects proposal retry after cancellation", async () => {
+    const service = await makeService(
+      new FakeRunner(),
+      {},
+      new FakePlanner(new ContractPlanningError("Unavailable", "provider_error")),
+    );
+    const agent = await service.createAgent({ name: "Cancelled retry" });
+    const { run } = await service.sendMessage(agent.id, "Update source");
+    await service.cancelRun(run.id);
+
+    await expect(service.retryExecutionContractProposal(run.id)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+  });
+
+  it("lets a human add and remove writable authority without invoking the runner", async () => {
+    const runner = new FakeRunner();
+    const service = await makeService(
+      runner,
+      {},
+      new FakePlanner(new ContractPlanningError("Unavailable", "provider_error")),
+    );
+    const agent = await service.createAgent({ name: "Manual authority" });
+    await mkdir(path.join(agent.workspacePath, "src"));
+    const { run } = await service.sendMessage(agent.id, "Update source");
+
+    const added = await service.updateExecutionContract(run.id, {
+      writablePaths: ["src/**", "tests/**"],
+    });
+    expect(added.executionContract).toMatchObject({
+      writablePaths: ["src/**", "tests/**"],
+      protectedPaths: [".env", "deployment"],
+      approvedAt: null,
+    });
+    const removed = await service.updateExecutionContract(run.id, {
+      writablePaths: ["src/**"],
+    });
+    expect(removed.executionContract).toMatchObject({ writablePaths: ["src/**"] });
+    expect(runner.calls).toHaveLength(0);
+
+    await service.approveRun(run.id);
+    await expect.poll(() => runner.calls.length).toBe(1);
+    expect(runner.calls[0]).toMatchObject({
+      writablePaths: ["src/**"],
+      protectedPaths: [".env", "deployment"],
+    });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("treats an approved empty writable scope as a completely read-only workspace", async () => {
+    const runner = new FakeRunner();
+    const service = await makeService(
+      runner,
+      {},
+      new FakePlanner(new Error("provider returned 429")),
+    );
+    const agent = await service.createAgent({ name: "Read only fallback" });
+    const { run } = await service.sendMessage(agent.id, "Inspect without changes");
+
+    await service.approveRun(run.id);
+    await expect.poll(() => runner.calls.length).toBe(1);
+    expect(runner.calls[0]?.writablePaths).toEqual([]);
+    expect(runner.calls[0]?.authorityPlan.writableMounts).toEqual([]);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 
   it("falls back safely when planning returns invalid paths", async () => {
@@ -242,7 +451,8 @@ describe("Agent lifecycle", () => {
           protectedPaths: [".env", "deployment"],
           riskLevel: "medium",
           proposalSource: "fallback",
-          proposalNotice: "AI proposal unavailable — review contract manually.",
+          proposalNotice:
+            "AI proposal unavailable: the proposal contained an invalid workspace path. Configure authority manually or retry AI proposal.",
           approvedAt: null,
         },
       });
@@ -273,10 +483,12 @@ describe("Agent lifecycle", () => {
     });
     expect(runner.calls).toHaveLength(0);
 
-    const amended = await service.updateExecutionContract(run.id, [
-      ...(run.executionContract?.protectedPaths ?? []),
-      "src/auth.ts",
-    ]);
+    const amended = await service.updateExecutionContract(run.id, {
+      protectedPaths: [
+        ...(run.executionContract?.protectedPaths ?? []),
+        "src/auth.ts",
+      ],
+    });
     expect(amended.executionContract).toMatchObject({
       writablePaths: ["src/auth.ts"],
       protectedPaths: [".env", "deployment", "src/auth.ts"],
@@ -304,7 +516,7 @@ describe("Agent lifecycle", () => {
       {
         goal: "Complete the requested task",
         plannedActions: ["Update authentication source", "Run focused tests"],
-        writablePaths: ["src/auth"],
+        writablePaths: ["src/auth/**"],
         protectedPaths: [".env", "deployment/", "deployment/config.yml"],
         riskLevel: "low",
         rationale: "The human restricted changes to authentication source.",
@@ -313,7 +525,7 @@ describe("Agent lifecycle", () => {
       {
         goal: "Complete the requested task",
         plannedActions: ["Update authentication source", "Run focused tests"],
-        writablePaths: ["src/auth"],
+        writablePaths: ["src/auth/**"],
         protectedPaths: [".env", "deployment", "infra/secrets"],
         riskLevel: "medium",
         rationale: "Infrastructure secrets must also remain protected.",
@@ -322,11 +534,14 @@ describe("Agent lifecycle", () => {
     ]);
     const service = await makeService(runner, {}, planner);
     const agent = await service.createAgent({ name: "Negotiator" });
+    await mkdir(path.join(agent.workspacePath, "src"));
     const { run } = await service.sendMessage(agent.id, "Update authentication");
-    const humanEdited = await service.updateExecutionContract(run.id, [
-      ...(run.executionContract?.protectedPaths ?? []),
-      "package.json",
-    ]);
+    const humanEdited = await service.updateExecutionContract(run.id, {
+      protectedPaths: [
+        ...(run.executionContract?.protectedPaths ?? []),
+        "package.json",
+      ],
+    });
 
     const firstRevision = await service.negotiateExecutionContract(
       run.id,
@@ -339,7 +554,7 @@ describe("Agent lifecycle", () => {
       run: {
         status: "awaiting_approval",
         executionContract: {
-          writablePaths: ["src/auth"],
+          writablePaths: ["src/auth/**"],
           protectedPaths: [".env", "deployment", "package.json"],
           proposalSource: "ai",
           approvedAt: null,
@@ -361,16 +576,22 @@ describe("Agent lifecycle", () => {
       firstRevision.run.executionContract,
     );
     expect(secondRevision.run.executionContract).toMatchObject({
-      writablePaths: ["src/auth"],
+      writablePaths: ["src/auth/**"],
       protectedPaths: [".env", "deployment", "package.json", "infra/secrets"],
       riskLevel: "medium",
     });
     expect(runner.calls).toHaveLength(0);
 
-    const manuallyEdited = await service.updateExecutionContract(run.id, [
-      ...(secondRevision.run.executionContract?.protectedPaths ?? []),
-      "src/auth.ts",
-    ]);
+    const manuallyEdited = await service.updateExecutionContract(run.id, {
+      protectedPaths: [
+        ...(secondRevision.run.executionContract?.protectedPaths ?? []),
+        "src/auth.ts",
+      ],
+      writablePaths: ["src/**"],
+    });
+    expect(manuallyEdited.executionContract).toMatchObject({
+      writablePaths: ["src/**"],
+    });
     expect(manuallyEdited.executionContract?.protectedPaths).toEqual([
       ".env",
       "deployment",
@@ -389,6 +610,7 @@ describe("Agent lifecycle", () => {
       "infra/secrets",
       "src/auth.ts",
     ]);
+    expect(runner.calls[0]?.writablePaths).toEqual(["src/**"]);
     await expect(service.negotiateExecutionContract(run.id, "Change it again")).rejects
       .toMatchObject({ statusCode: 409 });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
@@ -413,10 +635,12 @@ describe("Agent lifecycle", () => {
       const service = await makeService(runner, {}, planner);
       const agent = await service.createAgent({ name: "Preserved" });
       const { run } = await service.sendMessage(agent.id, "Update authentication");
-      await service.updateExecutionContract(run.id, [
-        ...(run.executionContract?.protectedPaths ?? []),
-        "package.json",
-      ]);
+      await service.updateExecutionContract(run.id, {
+        protectedPaths: [
+          ...(run.executionContract?.protectedPaths ?? []),
+          "package.json",
+        ],
+      });
       const contractBefore = JSON.stringify(service.getRun(run.id).executionContract);
 
       const result = await service.negotiateExecutionContract(
@@ -449,10 +673,12 @@ describe("Agent lifecycle", () => {
     const service = await makeService(runner, {}, planner);
     const agent = await service.createAgent({ name: "Explicit removal" });
     const { run } = await service.sendMessage(agent.id, "Update source");
-    await service.updateExecutionContract(run.id, [
-      ...(run.executionContract?.protectedPaths ?? []),
-      "package.json",
-    ]);
+    await service.updateExecutionContract(run.id, {
+      protectedPaths: [
+        ...(run.executionContract?.protectedPaths ?? []),
+        "package.json",
+      ],
+    });
 
     const result = await service.negotiateExecutionContract(
       run.id,
@@ -473,10 +699,9 @@ describe("Agent lifecycle", () => {
     const agent = await service.createAgent({ name: "Guarded" });
     const { run } = await service.sendMessage(agent.id, "change source only");
 
-    const amended = await service.updateExecutionContract(run.id, [
-      "package.json",
-      "infra/secrets",
-    ]);
+    const amended = await service.updateExecutionContract(run.id, {
+      protectedPaths: ["package.json", "infra/secrets"],
+    });
     expect(amended.executionContract?.protectedPaths).toEqual([
       "package.json",
       "infra/secrets",
@@ -500,9 +725,9 @@ describe("Agent lifecycle", () => {
     expect(persisted.executionContract?.protectedPaths).toEqual(
       runner.calls[0]?.protectedPaths,
     );
-    await expect(service.updateExecutionContract(run.id, ["different"])).rejects.toMatchObject({
-      statusCode: 409,
-    });
+    await expect(
+      service.updateExecutionContract(run.id, { protectedPaths: ["different"] }),
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it("never executes a cancelled or unapproved Run", async () => {
@@ -530,6 +755,48 @@ describe("Agent lifecycle", () => {
     expect(runner.calls).toHaveLength(0);
   });
 
+  it("rejects a legacy V0 pending Run instead of using weaker authority", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-v0-test-"));
+    temporaryDirectories.push(root);
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: path.join(root, "data"),
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+      RUNTIME_PROVIDER: "container",
+    });
+    const store = new JsonStore(path.join(root, "data", "db.json"));
+    const runner = new FakeRunner();
+    const service = new AgentService(
+      config,
+      store,
+      new WorkspaceManager(path.join(root, "workspaces")),
+      runner,
+      new FakePlanner(),
+    );
+    await service.initialize();
+    const agent = await service.createAgent({ name: "Legacy" });
+    const { run } = await service.sendMessage(agent.id, "legacy pending task");
+    await store.mutate((database) => {
+      const storedRun = database.runs.find((item) => item.id === run.id)!;
+      storedRun.executionContract = {
+        version: 0,
+        protectedPaths: [".env"],
+        approvedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    await expect(service.approveRun(run.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining("cancel and resubmit"),
+    });
+    expect(service.getRun(run.id).status).toBe("awaiting_approval");
+    expect(runner.calls).toHaveLength(0);
+  });
+
   it.each([
     [[""], "between 1 and 512"],
     [["/etc"], "workspace-relative"],
@@ -540,7 +807,26 @@ describe("Agent lifecycle", () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Invalid" });
     const { run } = await service.sendMessage(agent.id, "validate contract");
-    await expect(service.updateExecutionContract(run.id, protectedPaths)).rejects.toMatchObject({
+    await expect(
+      service.updateExecutionContract(run.id, { protectedPaths }),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining(message),
+    });
+  });
+
+  it.each([
+    [[""], "between 1 and 512"],
+    [["/etc"], "workspace-relative"],
+    [["../outside"], "workspace-relative"],
+    [["missing/file.ts"], "parent does not exist"],
+  ])("rejects invalid writable paths %#", async (writablePaths, message) => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Invalid writable" });
+    const { run } = await service.sendMessage(agent.id, "validate authority");
+    await expect(
+      service.updateExecutionContract(run.id, { writablePaths }),
+    ).rejects.toMatchObject({
       statusCode: 400,
       message: expect.stringContaining(message),
     });
@@ -568,7 +854,10 @@ describe("Agent lifecycle", () => {
     await first.initialize();
     const agent = await first.createAgent({ name: "Persistent" });
     const { run } = await first.sendMessage(agent.id, "wait for approval");
-    await first.updateExecutionContract(run.id, [".env", "ops"]);
+    await first.updateExecutionContract(run.id, {
+      protectedPaths: [".env", "ops"],
+      writablePaths: ["src/**"],
+    });
 
     const runnerAfterRestart = new FakeRunner();
     const restarted = new AgentService(
@@ -581,7 +870,11 @@ describe("Agent lifecycle", () => {
 
     expect(restarted.getRun(run.id)).toMatchObject({
       status: "awaiting_approval",
-      executionContract: { protectedPaths: [".env", "ops"], approvedAt: null },
+      executionContract: {
+        protectedPaths: [".env", "ops"],
+        writablePaths: ["src/**"],
+        approvedAt: null,
+      },
     });
     expect(restarted.getAgent(agent.id).status).toBe("busy");
     expect(runnerAfterRestart.calls).toHaveLength(0);

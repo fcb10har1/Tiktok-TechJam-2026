@@ -14,7 +14,14 @@ const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
 const workspaces = new WorkspaceManager(config.workspaceRoot);
 const runner = createRunner(config);
 const planner = new ArkContractPlanner(config);
-const service = new AgentService(config, store, workspaces, runner, planner);
+const service = new AgentService(
+  config,
+  store,
+  workspaces,
+  runner,
+  planner,
+  (diagnostic) => console.warn("Contract planner diagnostic", diagnostic),
+);
 await service.initialize();
 
 const app = await createApp(config, service);

@@ -930,6 +930,26 @@ textarea:focus {
   background: white;
 }
 
+.contract-editable-paths li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.contract-editable-paths li button {
+  border: 0;
+  background: transparent;
+  color: #a04b4b;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.contract-editable-paths li button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .contract-advisory,
 .contract-notice {
   margin: 10px 0 0;
@@ -952,6 +972,18 @@ textarea:focus {
 .contract-notice {
   background: #f4e9d7;
   color: #7b5726;
+}
+
+.contract-retry-proposal {
+  margin-top: 9px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.contract-retry-proposal span {
+  color: #777870;
+  font-size: 9px;
 }
 
 .contract-summary {

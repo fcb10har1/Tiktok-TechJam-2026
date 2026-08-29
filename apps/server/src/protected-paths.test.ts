@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { normalizeProtectedPaths } from "./protected-paths.js";
+import {
+  normalizeProtectedPaths,
+  normalizeWritablePaths,
+} from "./protected-paths.js";
 
 describe("normalizeProtectedPaths", () => {
   it("canonicalizes trailing slashes and deduplicates protected paths", () => {
@@ -30,5 +33,23 @@ describe("normalizeProtectedPaths", () => {
     expect(
       normalizeProtectedPaths(["deploy", "deployment/config.yml"]),
     ).toEqual(["deploy", "deployment/config.yml"]);
+  });
+
+  it("preserves explicit directory scopes and rejects unsupported globs", () => {
+    expect(
+      normalizeWritablePaths([
+        "src/**",
+        "src/components/App.tsx",
+        "tests/",
+        "tests/",
+        "package.json",
+      ]),
+    ).toEqual(["src/**", "tests/**", "package.json"]);
+    expect(() => normalizeWritablePaths(["src/*.ts"])).toThrow(
+      "only a terminal /** is allowed",
+    );
+    expect(() => normalizeWritablePaths(["src/../README.md"])).toThrow(
+      "workspace-relative",
+    );
   });
 });

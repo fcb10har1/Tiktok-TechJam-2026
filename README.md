@@ -201,6 +201,8 @@ cp deploy/volcengine/terraform.tfvars.example \
 | --- | --- | --- |
 | `ARK_API_KEY` | Required | Ark model API key. |
 | `ARK_MODEL` | Required | Responses-capable endpoint or model ID. |
+| `ARK_PLANNER_MODEL` | `ARK_MODEL` | Optional model used only for Execution Contract planning. |
+| `ARK_PLANNER_TIMEOUT_MS` | `30000` | Planner request timeout in milliseconds. |
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
@@ -225,6 +227,10 @@ flowchart LR
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.
+Approved V1 Execution Contracts are enforced in the local container as a
+read-only workspace with explicit read-write exceptions; protected paths always
+override writable scopes. See [the Local POC runtime-authority notes](docs/LOCAL_POC.md#runtime-write-authority)
+for exact directory/file semantics and limitations.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
 boundaries.

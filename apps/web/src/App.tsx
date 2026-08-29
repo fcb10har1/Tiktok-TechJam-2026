@@ -45,10 +45,15 @@ export default function App() {
   const [form, setForm] = useState(emptyForm);
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+  const [writablePathInput, setWritablePathInput] = useState("");
   const [protectedPathInput, setProtectedPathInput] = useState("");
   const [negotiationInstruction, setNegotiationInstruction] = useState("");
   const [negotiatingContract, setNegotiatingContract] = useState(false);
   const [negotiationNotice, setNegotiationNotice] = useState<string | null>(null);
+  const [retryingProposal, setRetryingProposal] = useState(false);
+  const [proposalRetryNotice, setProposalRetryNotice] = useState<string | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -102,10 +107,13 @@ export default function App() {
 
   useEffect(() => {
     setActiveRun(null);
+    setWritablePathInput("");
     setProtectedPathInput("");
     setNegotiationInstruction("");
     setNegotiationNotice(null);
     setNegotiatingContract(false);
+    setRetryingProposal(false);
+    setProposalRetryNotice(null);
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
@@ -241,6 +249,7 @@ export default function App() {
         setActiveRun(result.run);
         setNegotiationInstruction("");
         setNegotiationNotice(null);
+        setProposalRetryNotice(null);
       }
       setAgents((current) =>
         current.map((agent) =>
@@ -258,13 +267,40 @@ export default function App() {
     if (
       !activeRun ||
       activeRun.status !== "awaiting_approval" ||
-      negotiatingContract
+      negotiatingContract ||
+      retryingProposal
     ) return;
     setBusy(true);
     setError(null);
     try {
-      const { run } = await api.updateExecutionContract(activeRun.id, protectedPaths);
+      const { run } = await api.updateExecutionContract(activeRun.id, {
+        protectedPaths,
+      });
       setActiveRun(run);
+      setProposalRetryNotice(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const replaceWritablePaths = async (writablePaths: string[]) => {
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      activeRun.executionContract?.version !== 1 ||
+      negotiatingContract ||
+      retryingProposal
+    ) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { run } = await api.updateExecutionContract(activeRun.id, {
+        writablePaths,
+      });
+      setActiveRun(run);
+      setProposalRetryNotice(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -279,7 +315,8 @@ export default function App() {
       !activeRun ||
       activeRun.status !== "awaiting_approval" ||
       activeRun.executionContract?.version !== 1 ||
-      !instruction
+      !instruction ||
+      retryingProposal
     ) return;
     setNegotiatingContract(true);
     setNegotiationNotice(null);
@@ -288,6 +325,7 @@ export default function App() {
       const result = await api.negotiateExecutionContract(activeRun.id, instruction);
       setActiveRun(result.run);
       setNegotiationNotice(result.notice);
+      setProposalRetryNotice(null);
       if (result.applied) setNegotiationInstruction("");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -305,8 +343,43 @@ export default function App() {
     setProtectedPathInput("");
   };
 
+  const addWritablePath = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const writablePath = writablePathInput.trim();
+    const contract = activeRun?.executionContract;
+    if (!writablePath || contract?.version !== 1) return;
+    await replaceWritablePaths([...contract.writablePaths, writablePath]);
+    setWritablePathInput("");
+  };
+
+  const retryExecutionContractProposal = async () => {
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      activeRun.executionContract?.version !== 1 ||
+      activeRun.executionContract.proposalSource !== "fallback"
+    ) return;
+    setRetryingProposal(true);
+    setProposalRetryNotice(null);
+    setError(null);
+    try {
+      const result = await api.retryExecutionContractProposal(activeRun.id);
+      setActiveRun(result.run);
+      setProposalRetryNotice(result.notice);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRetryingProposal(false);
+    }
+  };
+
   const approveRun = async () => {
-    if (!activeRun || activeRun.status !== "awaiting_approval" || !selected) return;
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      !selected ||
+      retryingProposal
+    ) return;
     setBusy(true);
     setError(null);
     try {
@@ -323,7 +396,12 @@ export default function App() {
   };
 
   const cancelPendingRun = async () => {
-    if (!activeRun || activeRun.status !== "awaiting_approval" || !selected) return;
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      !selected ||
+      retryingProposal
+    ) return;
     setBusy(true);
     setError(null);
     try {
@@ -656,6 +734,28 @@ export default function App() {
                               {activeRun.executionContract.proposalNotice}
                             </p>
                           )}
+                          {activeRun.executionContract.proposalSource === "fallback" && (
+                            <div className="contract-retry-proposal">
+                              <button
+                                type="button"
+                                className="button button-ghost"
+                                disabled={busy || negotiatingContract || retryingProposal}
+                                onClick={() => void retryExecutionContractProposal()}
+                              >
+                                {retryingProposal ? <Spinner /> : "Retry AI Proposal"}
+                              </button>
+                              {retryingProposal && (
+                                <span role="status">
+                                  Planning only—Codex is not running.
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          {proposalRetryNotice && (
+                            <p className="contract-negotiation-notice" role="status">
+                              {proposalRetryNotice}
+                            </p>
+                          )}
                           <div className="contract-task">
                             <strong>Goal</strong>
                             <p>{activeRun.executionContract.goal}</p>
@@ -675,26 +775,67 @@ export default function App() {
                             )}
                           </div>
                           <div className="contract-section">
-                            <strong>Proposed writable scope</strong>
+                            <strong>Runtime-enforced write authority</strong>
                             {activeRun.executionContract.writablePaths.length > 0 ? (
-                              <ul className="contract-scope-list">
+                              <ul className="contract-scope-list contract-editable-paths">
                                 {activeRun.executionContract.writablePaths.map(
                                   (writablePath) => (
                                     <li key={writablePath}>
                                       <code>{writablePath}</code>
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          busy || negotiatingContract || retryingProposal
+                                        }
+                                        onClick={() =>
+                                          void replaceWritablePaths(
+                                            activeRun.executionContract?.version === 1
+                                              ? activeRun.executionContract.writablePaths.filter(
+                                                  (item) => item !== writablePath,
+                                                )
+                                              : [],
+                                          )
+                                        }
+                                        aria-label={"Remove writable path " + writablePath}
+                                      >
+                                        Remove
+                                      </button>
                                     </li>
                                   ),
                                 )}
                               </ul>
                             ) : (
                               <p className="contract-empty">
-                                No writable paths were proposed.
+                                No write authority is requested. The workspace will be
+                                completely read-only.
                               </p>
                             )}
+                            <form className="contract-add-path" onSubmit={addWritablePath}>
+                              <input
+                                value={writablePathInput}
+                                onChange={(event) =>
+                                  setWritablePathInput(event.target.value)
+                                }
+                                placeholder="Add writable path, e.g. src/**"
+                                disabled={busy || negotiatingContract || retryingProposal}
+                              />
+                              <button
+                                type="submit"
+                                className="button button-ghost"
+                                disabled={
+                                  busy ||
+                                  negotiatingContract ||
+                                  retryingProposal ||
+                                  !writablePathInput.trim()
+                                }
+                              >
+                                Add path
+                              </button>
+                            </form>
                             <p className="contract-advisory">
-                              <strong>V1B advisory:</strong> this writable scope is not
-                              runtime-enforced. Protected paths are the only filesystem
-                              restrictions currently enforced.
+                              <strong>Enforced after approval:</strong> the Agent can
+                              modify or create files only inside these approved scopes.
+                              Everything else in the workspace is read-only.
                             </p>
                           </div>
                           <div className="contract-summary">
@@ -733,7 +874,7 @@ export default function App() {
                                 placeholder="Tell Ultr0n what you want changed..."
                                 rows={2}
                                 maxLength={5_000}
-                                disabled={busy || negotiatingContract}
+                                disabled={busy || negotiatingContract || retryingProposal}
                               />
                               <button
                                 type="submit"
@@ -741,6 +882,7 @@ export default function App() {
                                 disabled={
                                   busy ||
                                   negotiatingContract ||
+                                  retryingProposal ||
                                   !negotiationInstruction.trim()
                                 }
                               >
@@ -779,7 +921,7 @@ export default function App() {
                                 <code>{protectedPath}</code>
                                 <button
                                   type="button"
-                                  disabled={busy || negotiatingContract}
+                                  disabled={busy || negotiatingContract || retryingProposal}
                                   onClick={() =>
                                     void replaceProtectedPaths(
                                       activeRun.executionContract?.protectedPaths.filter(
@@ -800,13 +942,16 @@ export default function App() {
                             value={protectedPathInput}
                             onChange={(event) => setProtectedPathInput(event.target.value)}
                             placeholder="Add workspace-relative path"
-                            disabled={busy || negotiatingContract}
+                            disabled={busy || negotiatingContract || retryingProposal}
                           />
                           <button
                             type="submit"
                             className="button button-ghost"
                             disabled={
-                              busy || negotiatingContract || !protectedPathInput.trim()
+                              busy ||
+                              negotiatingContract ||
+                              retryingProposal ||
+                              !protectedPathInput.trim()
                             }
                           >
                             Add path
@@ -814,14 +959,15 @@ export default function App() {
                         </form>
                       </div>
                       <p className="contract-limitation">
-                        Protected mounts cover only paths that exist when the container starts.
-                        A listed path that does not exist can still be created during this Run.
+                        Protected paths always override writable scopes. Directory scopes
+                        ending in <code>/**</code> authorize new descendants; exact-file
+                        scopes do not make sibling files writable.
                       </p>
                       <div className="contract-actions">
                         <button
                           type="button"
                           className="button button-ghost"
-                          disabled={busy || negotiatingContract}
+                          disabled={busy || negotiatingContract || retryingProposal}
                           onClick={() => void cancelPendingRun()}
                         >
                           Cancel
@@ -829,7 +975,7 @@ export default function App() {
                         <button
                           type="button"
                           className="button button-primary"
-                          disabled={busy || negotiatingContract}
+                          disabled={busy || negotiatingContract || retryingProposal}
                           onClick={() => void approveRun()}
                         >
                           {busy ? <Spinner /> : "Approve & Run"}

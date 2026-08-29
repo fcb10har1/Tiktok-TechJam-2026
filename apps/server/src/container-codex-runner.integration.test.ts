@@ -1,17 +1,26 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildWorkspaceMountArgs } from "./container-codex-runner.js";
+import type { RunnerRequest } from "./types.js";
+import { prepareWorkspaceAuthority } from "./workspace-authority.js";
 
 const execFileAsync = promisify(execFile);
 const integrationRequired = process.env.AGENTGUARD_CONTAINER_INTEGRATION === "1";
 const containerEngine = process.env.CONTAINER_ENGINE ?? "docker";
 const runtimeImage = process.env.AGENTGUARD_RUNTIME_IMAGE ?? "volc-agent-runtime:local";
 
-describe.skipIf(!integrationRequired)("AgentGuard container filesystem enforcement", () => {
+describe.skipIf(!integrationRequired)("AgentGuard default-deny write authority", () => {
   let workspacePath = "";
 
   beforeAll(async () => {
@@ -33,18 +42,25 @@ describe.skipIf(!integrationRequired)("AgentGuard container filesystem enforceme
       { timeout: 20_000 },
     );
 
-    workspacePath = await mkdtemp(path.join(tmpdir(), "agentguard-integration-"));
-    await mkdir(path.join(workspacePath, "src"));
+    workspacePath = await mkdtemp(path.join(tmpdir(), "authority-integration-"));
+    await mkdir(path.join(workspacePath, "src", "auth"), { recursive: true });
     await mkdir(path.join(workspacePath, "deployment"));
     await writeFile(path.join(workspacePath, ".env"), "SECRET_VALUE=ORIGINAL\n");
+    await writeFile(path.join(workspacePath, "README.md"), "README ORIGINAL\n");
+    await writeFile(path.join(workspacePath, "outside.ts"), "OUTSIDE ORIGINAL\n");
     await writeFile(
-      path.join(workspacePath, "src", "allowed.ts"),
-      'export const value = "ORIGINAL";\n',
+      path.join(workspacePath, "src", "auth", "login.ts"),
+      'export const login = "ORIGINAL";\n',
+    );
+    await writeFile(
+      path.join(workspacePath, "src", "auth", "secret.txt"),
+      "AUTH SECRET ORIGINAL\n",
     );
     await writeFile(
       path.join(workspacePath, "deployment", "config.yml"),
       "environment: production\n",
     );
+    await symlink("../../README.md", path.join(workspacePath, "src", "auth", "readme-link"));
   }, 30_000);
 
   afterAll(async () => {
@@ -52,39 +68,107 @@ describe.skipIf(!integrationRequired)("AgentGuard container filesystem enforceme
   });
 
   it(
-    "allows src writes and blocks shell, Node, Python, delete, and replace bypasses",
+    "enforces approved directory and exact-file authority with protected overrides",
     async () => {
-      const mountArgs = buildWorkspaceMountArgs({
-        agentId: "agentguard-integration",
+      const authority = prepareWorkspaceAuthority({
         workspacePath,
-        prompt: "deterministic filesystem probe",
-        threadId: null,
-        protectedPaths: [".env", "deployment"],
+        writablePaths: [
+          "src/auth/**",
+          "tests/**",
+          "public/**",
+          "package.json",
+          "deployment/config.yml",
+        ],
+        protectedPaths: [
+          ".env",
+          "deployment/**",
+          "src/auth/secret.txt",
+          "src/auth/future-secret.txt",
+        ],
       });
+      expect(authority.preparations).toEqual([
+        {
+          path: "tests",
+          kind: "directory",
+          purpose: "writable",
+          existedBeforeRun: false,
+        },
+        {
+          path: "public",
+          kind: "directory",
+          purpose: "writable",
+          existedBeforeRun: false,
+        },
+        {
+          path: "package.json",
+          kind: "file",
+          purpose: "writable",
+          existedBeforeRun: false,
+        },
+        {
+          path: "src/auth/future-secret.txt",
+          kind: "file",
+          purpose: "protected",
+          existedBeforeRun: false,
+        },
+      ]);
+      expect(authority.plan.writableMounts.map((mount) => mount.path)).toEqual([
+        "src/auth",
+        "tests",
+        "public",
+        "package.json",
+      ]);
+      const request: RunnerRequest = {
+        agentId: "authority-integration",
+        workspacePath,
+        prompt: "deterministic filesystem authority probe",
+        threadId: null,
+        writablePaths: authority.writablePaths,
+        protectedPaths: authority.protectedPaths,
+        authorityPlan: authority.plan,
+      };
+      const mountArgs = buildWorkspaceMountArgs(request, containerEngine);
       const script = String.raw`
 set -eu
-printf 'export const value = "MODIFIED";\n' > /workspace/src/allowed.ts
 
-if sh -c "printf 'SECRET_VALUE=SHELL\n' > /workspace/.env"; then exit 11; fi
-if sh -c "printf 'environment: shell\n' > /workspace/deployment/config.yml"; then exit 12; fi
+# Shell, Node, and Python writes inside approved directory authority.
+printf 'SHELL\n' > /workspace/src/auth/login.ts
+node -e "require('node:fs').writeFileSync('/workspace/src/auth/node.ts', 'NODE\\n')"
+python3 -c "open('/workspace/src/auth/python.ts', 'w').write('PYTHON\\n')"
+printf 'NEW DESCENDANT\n' > /workspace/src/auth/helper.ts
 
-node -e "require('node:fs').writeFileSync('/workspace/src/allowed.ts', 'NODE\\n')"
-if node -e "require('node:fs').writeFileSync('/workspace/.env', 'SECRET_VALUE=NODE\\n')"; then exit 13; fi
-if node -e "require('node:fs').writeFileSync('/workspace/deployment/config.yml', 'environment: node\\n')"; then exit 14; fi
+# Prepared greenfield roots and exact file.
+printf 'TEST\n' > /workspace/tests/app.test.ts
+printf 'PUBLIC\n' > /workspace/public/index.html
+printf '{"name":"greenfield"}\n' > /workspace/package.json
 
-python3 -c "open('/workspace/src/allowed.ts', 'w').write('PYTHON\\n')"
-if python3 -c "open('/workspace/.env', 'w').write('SECRET_VALUE=PYTHON\\n')"; then exit 15; fi
-if python3 -c "open('/workspace/deployment/config.yml', 'w').write('environment: python\\n')"; then exit 16; fi
+# Default-deny modification and creation outside approved authority.
+if sh -c "printf 'README MUTATED\n' > /workspace/README.md"; then exit 11; fi
+if sh -c "printf 'SECRET_VALUE=MUTATED\n' > /workspace/.env"; then exit 12; fi
+if sh -c "printf 'NEW SECRET\n' > /workspace/.env.production"; then exit 13; fi
+if sh -c "printf 'RANDOM\n' > /workspace/random-root.txt"; then exit 14; fi
+if rm -f /workspace/outside.ts; then exit 15; fi
 
-printf 'SECRET_VALUE=REPLACEMENT\n' > /workspace/.env.replacement
-if mv -f /workspace/.env.replacement /workspace/.env; then exit 17; fi
-rm -f /workspace/.env.replacement
-if rm -f /workspace/.env; then exit 18; fi
-printf 'environment: replacement\n' > /workspace/config.replacement
-if mv -f /workspace/config.replacement /workspace/deployment/config.yml; then exit 19; fi
-rm -f /workspace/config.replacement
-if rm -rf /workspace/deployment; then exit 20; fi
-printf 'export const value = "MODIFIED";\n' > /workspace/src/allowed.ts
+# Replacement and traversal cannot escape an approved subtree.
+printf 'REPLACEMENT\n' > /workspace/src/auth/replacement.tmp
+if mv -f /workspace/src/auth/replacement.tmp /workspace/README.md; then exit 16; fi
+rm -f /workspace/src/auth/replacement.tmp
+if sh -c "cd /workspace/src/auth && printf 'TRAVERSAL\n' > ../../README.md"; then exit 17; fi
+if sh -c "printf 'SYMLINK\n' > /workspace/src/auth/readme-link"; then exit 18; fi
+
+# Protected children and parents override writable requests.
+if sh -c "printf 'AUTH SECRET MUTATED\n' > /workspace/src/auth/secret.txt"; then exit 19; fi
+if sh -c "printf 'environment: mutated\n' > /workspace/deployment/config.yml"; then exit 20; fi
+if rm -f /workspace/src/auth/secret.txt; then exit 21; fi
+if sh -c "printf 'FUTURE SECRET\n' > /workspace/src/auth/future-secret.txt"; then exit 25; fi
+
+# Exact-file authority does not make its parent writable. Atomic replacement is limited.
+if sh -c "printf '{}\n' > /workspace/package-lock.json"; then exit 22; fi
+printf 'ATOMIC\n' > /tmp/package-replacement
+if mv -f /tmp/package-replacement /workspace/package.json; then exit 23; fi
+
+# A new hard link cannot cross from the read-only root mount into a writable mount.
+if ln /workspace/README.md /workspace/src/auth/readme-hardlink; then exit 24; fi
 `;
       const containerUser =
         typeof process.getuid === "function" && typeof process.getgid === "function"
@@ -116,11 +200,32 @@ printf 'export const value = "MODIFIED";\n' > /workspace/src/allowed.ts
       );
 
       await expect(
-        readFile(path.join(workspacePath, "src", "allowed.ts"), "utf8"),
-      ).resolves.toBe('export const value = "MODIFIED";\n');
+        readFile(path.join(workspacePath, "src", "auth", "login.ts"), "utf8"),
+      ).resolves.toBe("SHELL\n");
+      await expect(
+        readFile(path.join(workspacePath, "src", "auth", "node.ts"), "utf8"),
+      ).resolves.toBe("NODE\n");
+      await expect(
+        readFile(path.join(workspacePath, "src", "auth", "python.ts"), "utf8"),
+      ).resolves.toBe("PYTHON\n");
+      await expect(readFile(path.join(workspacePath, "package.json"), "utf8"))
+        .resolves.toBe('{"name":"greenfield"}\n');
+      await expect(readFile(path.join(workspacePath, "README.md"), "utf8")).resolves
+        .toBe("README ORIGINAL\n");
       await expect(readFile(path.join(workspacePath, ".env"), "utf8")).resolves.toBe(
         "SECRET_VALUE=ORIGINAL\n",
       );
+      await expect(readFile(path.join(workspacePath, "outside.ts"), "utf8")).resolves
+        .toBe("OUTSIDE ORIGINAL\n");
+      await expect(
+        readFile(path.join(workspacePath, "src", "auth", "secret.txt"), "utf8"),
+      ).resolves.toBe("AUTH SECRET ORIGINAL\n");
+      await expect(
+        readFile(
+          path.join(workspacePath, "src", "auth", "future-secret.txt"),
+          "utf8",
+        ),
+      ).resolves.toBe("");
       await expect(
         readFile(path.join(workspacePath, "deployment", "config.yml"), "utf8"),
       ).resolves.toBe("environment: production\n");

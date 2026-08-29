@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +8,8 @@ import {
   buildWorkspaceMountArgs,
   containerName,
 } from "./container-codex-runner.js";
+import type { RunnerRequest, WorkspaceAuthorityPlan } from "./types.js";
+import { prepareWorkspaceAuthority } from "./workspace-authority.js";
 
 describe("Container Codex runner", () => {
   const temporaryPaths: string[] = [];
@@ -18,6 +20,21 @@ describe("Container Codex runner", () => {
         rm(temporaryPath, { recursive: true, force: true }),
       ),
     );
+  });
+
+  const request = (
+    workspacePath: string,
+    authorityPlan: WorkspaceAuthorityPlan,
+    overrides: Partial<RunnerRequest> = {},
+  ): RunnerRequest => ({
+    agentId: "agent",
+    workspacePath,
+    prompt: "test",
+    threadId: null,
+    writablePaths: [],
+    protectedPaths: [],
+    authorityPlan,
+    ...overrides,
   });
 
   it("builds an isolated Docker/Podman-compatible invocation", () => {
@@ -32,14 +49,16 @@ describe("Container Codex runner", () => {
       CONTAINER_USER: "501:20",
       RUNTIME_INSTANCE_ID: "test-instance",
     });
+    const authorityPlan: WorkspaceAuthorityPlan = {
+      workspaceSourcePath: "/tmp/agent-workspace",
+      writableMounts: [],
+      protectedMounts: [],
+    };
     const args = buildContainerRunArgs(
-      {
+      request("/tmp/agent-workspace", authorityPlan, {
         agentId: "agent/unsafe",
-        workspacePath: "/tmp/agent-workspace",
         prompt: "write a small program",
-        threadId: null,
-        protectedPaths: [],
-      },
+      }),
       config,
     );
 
@@ -47,7 +66,9 @@ describe("Container Codex runner", () => {
       "launchpad-test-instance-agent-unsafe",
     );
     expect(args).toContain("runtime:test");
-    expect(args).toContain("type=bind,src=/tmp/agent-workspace,dst=/workspace");
+    expect(args).toContain(
+      "type=bind,src=/tmp/agent-workspace,dst=/workspace,readonly,bind-nonrecursive",
+    );
     expect(args).toContain("type=bind,src=/tmp/codex-home,dst=/codex-home");
     expect(args).toContain("501:20");
     expect(args).toContain("workspace-write");
@@ -64,74 +85,64 @@ describe("Container Codex runner", () => {
       RUNTIME_PROVIDER: "container",
     });
     const args = buildContainerRunArgs(
-      {
-        agentId: "agent",
-        workspacePath: "/tmp/workspace",
-        prompt: "continue",
-        threadId: "thread-123",
-        protectedPaths: [],
-      },
+      request(
+        "/tmp/workspace",
+        {
+          workspaceSourcePath: "/tmp/workspace",
+          writableMounts: [],
+          protectedMounts: [],
+        },
+        { prompt: "continue", threadId: "thread-123" },
+      ),
       config,
     );
     expect(args.slice(-3)).toEqual(["resume", "thread-123", "continue"]);
     expect(args).not.toContain("keep-id");
   });
 
-  it("overlays existing protected paths with read-only bind mounts", async () => {
-    const workspacePath = await mkdtemp(path.join(tmpdir(), "agentguard-mounts-"));
+  it("orders a read-only root, writable exceptions, then protected overrides", async () => {
+    const workspacePath = await mkdtemp(path.join(tmpdir(), "authority-mounts-"));
     temporaryPaths.push(workspacePath);
-    await mkdir(path.join(workspacePath, "deployment"));
-    await writeFile(path.join(workspacePath, ".env"), "SECRET_VALUE=ORIGINAL\n");
-    await writeFile(
-      path.join(workspacePath, "deployment", "config.yml"),
-      "environment: production\n",
-    );
-
+    await mkdir(path.join(workspacePath, "src"));
+    await mkdir(path.join(workspacePath, "src", "secrets"));
+    await writeFile(path.join(workspacePath, "src", "app.ts"), "app\n");
+    await writeFile(path.join(workspacePath, "src", "secrets", "key"), "secret\n");
+    await writeFile(path.join(workspacePath, "package.json"), "{}\n");
+    await writeFile(path.join(workspacePath, ".env"), "SECRET=original\n");
+    const authority = prepareWorkspaceAuthority({
+      workspacePath,
+      writablePaths: ["src/**", "package.json"],
+      protectedPaths: [".env", "src/secrets/**"],
+    });
     const canonicalWorkspace = await realpath(workspacePath);
+
     expect(
-      buildWorkspaceMountArgs({
-        agentId: "agent",
-        workspacePath,
-        prompt: "test",
-        threadId: null,
-        protectedPaths: [
-          ".env",
-          "deployment/",
-          "deployment",
-          "deployment/config.yml",
-        ],
-      }),
+      buildWorkspaceMountArgs(
+        request(workspacePath, authority.plan, {
+          writablePaths: authority.writablePaths,
+          protectedPaths: authority.protectedPaths,
+        }),
+        "docker",
+      ),
     ).toEqual([
       "--mount",
-      "type=bind,src=" + workspacePath + ",dst=/workspace",
+      "type=bind,src=" +
+        canonicalWorkspace +
+        ",dst=/workspace,readonly,bind-recursive=disabled",
+      "--mount",
+      "type=bind,src=" +
+        canonicalWorkspace +
+        "/src,dst=/workspace/src,bind-recursive=disabled",
+      "--mount",
+      "type=bind,src=" +
+        canonicalWorkspace +
+        "/package.json,dst=/workspace/package.json",
       "--mount",
       "type=bind,src=" + canonicalWorkspace + "/.env,dst=/workspace/.env,readonly",
       "--mount",
       "type=bind,src=" +
         canonicalWorkspace +
-        "/deployment,dst=/workspace/deployment,readonly",
+        "/src/secrets,dst=/workspace/src/secrets,readonly,bind-recursive=disabled",
     ]);
-  });
-
-  it("rejects protected path traversal and symlink escapes", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "agentguard-validation-"));
-    temporaryPaths.push(root);
-    const workspacePath = path.join(root, "workspace");
-    await mkdir(workspacePath);
-    await writeFile(path.join(root, "outside"), "outside\n");
-    await symlink(path.join(root, "outside"), path.join(workspacePath, "escape"));
-    const request = {
-      agentId: "agent",
-      workspacePath,
-      prompt: "test",
-      threadId: null,
-    };
-
-    expect(() =>
-      buildWorkspaceMountArgs({ ...request, protectedPaths: ["../outside"] }),
-    ).toThrow("Protected path must be a workspace-relative POSIX path");
-    expect(() =>
-      buildWorkspaceMountArgs({ ...request, protectedPaths: ["escape"] }),
-    ).toThrow("Protected path resolves outside the workspace");
   });
 });

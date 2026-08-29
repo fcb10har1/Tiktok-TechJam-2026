@@ -55,6 +55,12 @@ describe("HTTP boundary", () => {
     };
     const contractService = {
       updateExecutionContract: vi.fn(async () => run),
+      retryExecutionContractProposal: vi.fn(async () => ({
+        run,
+        applied: false,
+        notice: "AI proposal unavailable: temporarily rate limited. Your current contract was preserved.",
+        failureCode: "rate_limited",
+      })),
       negotiateExecutionContract: vi.fn(async () => ({
         run,
         applied: true,
@@ -71,10 +77,30 @@ describe("HTTP boundary", () => {
       payload: { protectedPaths: [".env", "deployment"] },
     });
     expect(amended.statusCode).toBe(200);
-    expect(contractService.updateExecutionContract).toHaveBeenCalledWith(runId, [
-      ".env",
-      "deployment",
-    ]);
+    expect(contractService.updateExecutionContract).toHaveBeenCalledWith(runId, {
+      protectedPaths: [".env", "deployment"],
+    });
+
+    const writableAmendment = await app.inject({
+      method: "PATCH",
+      url: "/api/runs/" + runId + "/contract",
+      payload: { writablePaths: ["src/**"] },
+    });
+    expect(writableAmendment.statusCode).toBe(200);
+    expect(contractService.updateExecutionContract).toHaveBeenLastCalledWith(runId, {
+      writablePaths: ["src/**"],
+    });
+
+    const retried = await app.inject({
+      method: "POST",
+      url: "/api/runs/" + runId + "/contract/retry-proposal",
+    });
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toMatchObject({
+      applied: false,
+      failureCode: "rate_limited",
+    });
+    expect(contractService.retryExecutionContractProposal).toHaveBeenCalledWith(runId);
 
     const negotiated = await app.inject({
       method: "POST",
@@ -107,6 +133,13 @@ describe("HTTP boundary", () => {
       payload: { protectedPaths: "not-an-array" },
     });
     expect(malformed.statusCode).toBe(400);
+
+    const emptyAmendment = await app.inject({
+      method: "PATCH",
+      url: "/api/runs/" + runId + "/contract",
+      payload: {},
+    });
+    expect(emptyAmendment.statusCode).toBe(400);
 
     const emptyNegotiation = await app.inject({
       method: "POST",
