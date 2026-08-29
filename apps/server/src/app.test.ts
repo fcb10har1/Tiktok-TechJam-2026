@@ -55,6 +55,11 @@ describe("HTTP boundary", () => {
     };
     const contractService = {
       updateExecutionContract: vi.fn(async () => run),
+      negotiateExecutionContract: vi.fn(async () => ({
+        run,
+        applied: true,
+        notice: null,
+      })),
       approveRun: vi.fn(async () => ({ ...run, status: "queued" })),
       cancelRun: vi.fn(async () => ({ ...run, status: "cancelled" })),
     } as unknown as AgentService;
@@ -70,6 +75,17 @@ describe("HTTP boundary", () => {
       ".env",
       "deployment",
     ]);
+
+    const negotiated = await app.inject({
+      method: "POST",
+      url: "/api/runs/" + runId + "/contract/negotiate",
+      payload: { instruction: "Protect package.json too." },
+    });
+    expect(negotiated.statusCode).toBe(200);
+    expect(contractService.negotiateExecutionContract).toHaveBeenCalledWith(
+      runId,
+      "Protect package.json too.",
+    );
 
     const approved = await app.inject({
       method: "POST",
@@ -91,6 +107,20 @@ describe("HTTP boundary", () => {
       payload: { protectedPaths: "not-an-array" },
     });
     expect(malformed.statusCode).toBe(400);
+
+    const emptyNegotiation = await app.inject({
+      method: "POST",
+      url: "/api/runs/" + runId + "/contract/negotiate",
+      payload: { instruction: "   " },
+    });
+    expect(emptyNegotiation.statusCode).toBe(400);
+
+    const oversizedNegotiation = await app.inject({
+      method: "POST",
+      url: "/api/runs/" + runId + "/contract/negotiate",
+      payload: { instruction: "x".repeat(5_001) },
+    });
+    expect(oversizedNegotiation.statusCode).toBe(400);
     await app.close();
   });
 });

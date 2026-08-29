@@ -83,6 +83,14 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ protectedPaths }),
     }),
+  negotiateExecutionContract: (id: string, instruction: string) =>
+    request<{ run: AgentRun; applied: boolean; notice: string | null }>(
+      "/api/runs/" + id + "/contract/negotiate",
+      {
+        method: "POST",
+        body: JSON.stringify({ instruction }),
+      },
+    ),
   approveRun: (id: string) =>
     request<{ run: AgentRun }>("/api/runs/" + id + "/approve", {
       method: "POST",

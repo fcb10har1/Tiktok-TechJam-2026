@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   ArkContractPlanner,
+  type ContractAmendment,
   type ContractProposal,
 } from "./contract-planner.js";
+import type { ExecutionContractV1 } from "./types.js";
 
 const validProposal: ContractProposal = {
   goal: "Update the source safely",
@@ -12,6 +14,23 @@ const validProposal: ContractProposal = {
   protectedPaths: [".env", "deployment"],
   riskLevel: "low",
   rationale: "The task is limited to application source.",
+};
+
+const currentContract: ExecutionContractV1 = {
+  version: 1,
+  ...validProposal,
+  protectedPaths: [".env", "deployment", "package.json"],
+  proposalSource: "ai",
+  proposalNotice: null,
+  approvedAt: null,
+  updatedAt: "2026-08-29T10:00:00.000Z",
+};
+
+const validAmendment: ContractAmendment = {
+  ...validProposal,
+  writablePaths: ["src/auth"],
+  protectedPaths: [".env", "deployment/", "deployment/config.yml", "package.json"],
+  removedProtectedPaths: [],
 };
 
 function config(environment: NodeJS.ProcessEnv = {}) {
@@ -47,6 +66,16 @@ function planningInput() {
   };
 }
 
+function amendmentInput() {
+  return {
+    task: "Improve authentication",
+    agentInstructions: "Keep changes small.",
+    currentContract,
+    amendmentInstruction: "Only touch src/auth.",
+    workspaceInventory: ["AGENTS.md", "src/", "src/auth.ts", "package.json"],
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -75,6 +104,60 @@ describe("ArkContractPlanner", () => {
     });
     expect(JSON.stringify(body.input)).toContain("Change src/index.ts");
     expect(JSON.stringify(body.input)).toContain("src/index.ts");
+  });
+
+  it("sends the complete current contract for a strict tool-free amendment", async () => {
+    const fetchMock = vi.fn(async () => providerResponse(validAmendment));
+    const planner = new ArkContractPlanner(config(), fetchMock as unknown as typeof fetch);
+
+    await expect(planner.amend(amendmentInput())).resolves.toEqual({
+      ...validAmendment,
+      protectedPaths: [".env", "deployment", "package.json"],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body).not.toHaveProperty("tools");
+    expect(body.text.format).toMatchObject({
+      type: "json_schema",
+      name: "execution_contract_amendment_v1",
+      strict: true,
+    });
+    expect(body.text.format.schema.required).toContain("removedProtectedPaths");
+    expect(body.instructions).toContain("Preserve every existing protected path");
+    const input = JSON.stringify(body.input);
+    expect(input).toContain("Improve authentication");
+    expect(input).toContain("Only touch src/auth.");
+    expect(input).toContain("package.json");
+  });
+
+  it("does not retry a rate-limited amendment", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+        status: 429,
+      }),
+    );
+    const planner = new ArkContractPlanner(config(), fetchMock as unknown as typeof fetch);
+
+    await expect(planner.amend(amendmentInput())).rejects.toThrow(
+      "Planner request failed",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects malformed amendment JSON", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          output: [{ content: [{ type: "output_text", text: "not json" }] }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const planner = new ArkContractPlanner(config(), fetchMock as unknown as typeof fetch);
+
+    await expect(planner.amend(amendmentInput())).rejects.toThrow(
+      "Planner returned malformed contract JSON",
+    );
   });
 
   it("retries once without text.format only when a 400 explicitly rejects it", async () => {

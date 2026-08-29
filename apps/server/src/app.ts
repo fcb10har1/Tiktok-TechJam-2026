@@ -25,6 +25,9 @@ const messageBody = z.object({
 const executionContractBody = z.object({
   protectedPaths: z.array(z.string()).max(100),
 });
+const contractNegotiationBody = z.object({
+  instruction: z.string().trim().min(1).max(5_000),
+});
 
 export async function createApp(
   config: AppConfig,
@@ -135,6 +138,12 @@ export async function createApp(
     const { id } = runIdParams.parse(request.params);
     const body = executionContractBody.parse(request.body);
     return { run: await service.updateExecutionContract(id, body.protectedPaths) };
+  });
+
+  app.post("/api/runs/:id/contract/negotiate", async (request) => {
+    const { id } = runIdParams.parse(request.params);
+    const body = contractNegotiationBody.parse(request.body);
+    return service.negotiateExecutionContract(id, body.instruction);
   });
 
   app.post("/api/runs/:id/approve", async (request, reply) => {

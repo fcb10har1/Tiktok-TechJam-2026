@@ -46,6 +46,9 @@ export default function App() {
   const [prompt, setPrompt] = useState("");
   const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
   const [protectedPathInput, setProtectedPathInput] = useState("");
+  const [negotiationInstruction, setNegotiationInstruction] = useState("");
+  const [negotiatingContract, setNegotiatingContract] = useState(false);
+  const [negotiationNotice, setNegotiationNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -100,6 +103,9 @@ export default function App() {
   useEffect(() => {
     setActiveRun(null);
     setProtectedPathInput("");
+    setNegotiationInstruction("");
+    setNegotiationNotice(null);
+    setNegotiatingContract(false);
     setShowSettings(false);
     if (!selectedId) {
       setMessages([]);
@@ -233,6 +239,8 @@ export default function App() {
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
+        setNegotiationInstruction("");
+        setNegotiationNotice(null);
       }
       setAgents((current) =>
         current.map((agent) =>
@@ -247,7 +255,11 @@ export default function App() {
   };
 
   const replaceProtectedPaths = async (protectedPaths: string[]) => {
-    if (!activeRun || activeRun.status !== "awaiting_approval") return;
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      negotiatingContract
+    ) return;
     setBusy(true);
     setError(null);
     try {
@@ -257,6 +269,30 @@ export default function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const negotiateExecutionContract = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const instruction = negotiationInstruction.trim();
+    if (
+      !activeRun ||
+      activeRun.status !== "awaiting_approval" ||
+      activeRun.executionContract?.version !== 1 ||
+      !instruction
+    ) return;
+    setNegotiatingContract(true);
+    setNegotiationNotice(null);
+    setError(null);
+    try {
+      const result = await api.negotiateExecutionContract(activeRun.id, instruction);
+      setActiveRun(result.run);
+      setNegotiationNotice(result.notice);
+      if (result.applied) setNegotiationInstruction("");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setNegotiatingContract(false);
     }
   };
 
@@ -656,7 +692,7 @@ export default function App() {
                               </p>
                             )}
                             <p className="contract-advisory">
-                              <strong>V1A advisory:</strong> this writable scope is not
+                              <strong>V1B advisory:</strong> this writable scope is not
                               runtime-enforced. Protected paths are the only filesystem
                               restrictions currently enforced.
                             </p>
@@ -680,6 +716,51 @@ export default function App() {
                               </div>
                             )}
                           </div>
+                          <form
+                            className="contract-negotiation"
+                            onSubmit={negotiateExecutionContract}
+                          >
+                            <label htmlFor="contract-negotiation-input">
+                              Negotiate this contract
+                            </label>
+                            <div className="contract-negotiation-row">
+                              <textarea
+                                id="contract-negotiation-input"
+                                value={negotiationInstruction}
+                                onChange={(event) =>
+                                  setNegotiationInstruction(event.target.value)
+                                }
+                                placeholder="Tell Ultr0n what you want changed..."
+                                rows={2}
+                                maxLength={5_000}
+                                disabled={busy || negotiatingContract}
+                              />
+                              <button
+                                type="submit"
+                                className="button button-ghost"
+                                disabled={
+                                  busy ||
+                                  negotiatingContract ||
+                                  !negotiationInstruction.trim()
+                                }
+                              >
+                                Apply changes
+                              </button>
+                            </div>
+                            {negotiatingContract && (
+                              <div className="contract-updating" role="status">
+                                <span className="contract-updating-dot" aria-hidden="true" />
+                                <span>
+                                  <strong>Updating contract…</strong> Codex is not running.
+                                </span>
+                              </div>
+                            )}
+                            {negotiationNotice && (
+                              <p className="contract-negotiation-notice" role="status">
+                                {negotiationNotice}
+                              </p>
+                            )}
+                          </form>
                         </>
                       ) : (
                         <div className="contract-task">
@@ -698,7 +779,7 @@ export default function App() {
                                 <code>{protectedPath}</code>
                                 <button
                                   type="button"
-                                  disabled={busy}
+                                  disabled={busy || negotiatingContract}
                                   onClick={() =>
                                     void replaceProtectedPaths(
                                       activeRun.executionContract?.protectedPaths.filter(
@@ -719,12 +800,14 @@ export default function App() {
                             value={protectedPathInput}
                             onChange={(event) => setProtectedPathInput(event.target.value)}
                             placeholder="Add workspace-relative path"
-                            disabled={busy}
+                            disabled={busy || negotiatingContract}
                           />
                           <button
                             type="submit"
                             className="button button-ghost"
-                            disabled={busy || !protectedPathInput.trim()}
+                            disabled={
+                              busy || negotiatingContract || !protectedPathInput.trim()
+                            }
                           >
                             Add path
                           </button>
@@ -738,7 +821,7 @@ export default function App() {
                         <button
                           type="button"
                           className="button button-ghost"
-                          disabled={busy}
+                          disabled={busy || negotiatingContract}
                           onClick={() => void cancelPendingRun()}
                         >
                           Cancel
@@ -746,7 +829,7 @@ export default function App() {
                         <button
                           type="button"
                           className="button button-primary"
-                          disabled={busy}
+                          disabled={busy || negotiatingContract}
                           onClick={() => void approveRun()}
                         >
                           {busy ? <Spinner /> : "Approve & Run"}

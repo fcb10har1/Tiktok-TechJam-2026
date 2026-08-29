@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import type {
+  ContractAmendment,
+  ContractAmendmentInput,
   ContractPlanner,
   ContractPlanningInput,
   ContractProposal,
@@ -43,13 +45,25 @@ const basicProposal: ContractProposal = {
 
 class FakePlanner implements ContractPlanner {
   readonly calls: ContractPlanningInput[] = [];
+  readonly amendmentCalls: ContractAmendmentInput[] = [];
 
-  constructor(private readonly result: ContractProposal | Error = basicProposal) {}
+  constructor(
+    private readonly result: ContractProposal | Error = basicProposal,
+    private readonly amendmentResults: Array<ContractAmendment | Error> = [],
+  ) {}
 
   async propose(input: ContractPlanningInput): Promise<ContractProposal> {
     this.calls.push(structuredClone(input));
     if (this.result instanceof Error) throw this.result;
     return structuredClone(this.result);
+  }
+
+  async amend(input: ContractAmendmentInput): Promise<ContractAmendment> {
+    this.amendmentCalls.push(structuredClone(input));
+    const result = this.amendmentResults.shift();
+    if (!result) throw new Error("No fake amendment was configured");
+    if (result instanceof Error) throw result;
+    return structuredClone(result);
   }
 }
 
@@ -282,6 +296,175 @@ describe("Agent lifecycle", () => {
       approvedAt: expect.any(String),
     });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("negotiates repeatedly, preserves human protections, and runs only after approval", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner(basicProposal, [
+      {
+        goal: "Complete the requested task",
+        plannedActions: ["Update authentication source", "Run focused tests"],
+        writablePaths: ["src/auth"],
+        protectedPaths: [".env", "deployment/", "deployment/config.yml"],
+        riskLevel: "low",
+        rationale: "The human restricted changes to authentication source.",
+        removedProtectedPaths: [],
+      },
+      {
+        goal: "Complete the requested task",
+        plannedActions: ["Update authentication source", "Run focused tests"],
+        writablePaths: ["src/auth"],
+        protectedPaths: [".env", "deployment", "infra/secrets"],
+        riskLevel: "medium",
+        rationale: "Infrastructure secrets must also remain protected.",
+        removedProtectedPaths: [],
+      },
+    ]);
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Negotiator" });
+    const { run } = await service.sendMessage(agent.id, "Update authentication");
+    const humanEdited = await service.updateExecutionContract(run.id, [
+      ...(run.executionContract?.protectedPaths ?? []),
+      "package.json",
+    ]);
+
+    const firstRevision = await service.negotiateExecutionContract(
+      run.id,
+      "Only touch src/auth.",
+    );
+
+    expect(firstRevision).toMatchObject({
+      applied: true,
+      notice: null,
+      run: {
+        status: "awaiting_approval",
+        executionContract: {
+          writablePaths: ["src/auth"],
+          protectedPaths: [".env", "deployment", "package.json"],
+          proposalSource: "ai",
+          approvedAt: null,
+        },
+      },
+    });
+    expect(planner.amendmentCalls[0]).toMatchObject({
+      task: "Update authentication",
+      amendmentInstruction: "Only touch src/auth.",
+      currentContract: humanEdited.executionContract,
+    });
+    expect(runner.calls).toHaveLength(0);
+
+    const secondRevision = await service.negotiateExecutionContract(
+      run.id,
+      "Protect infra/secrets too.",
+    );
+    expect(planner.amendmentCalls[1]?.currentContract).toEqual(
+      firstRevision.run.executionContract,
+    );
+    expect(secondRevision.run.executionContract).toMatchObject({
+      writablePaths: ["src/auth"],
+      protectedPaths: [".env", "deployment", "package.json", "infra/secrets"],
+      riskLevel: "medium",
+    });
+    expect(runner.calls).toHaveLength(0);
+
+    const manuallyEdited = await service.updateExecutionContract(run.id, [
+      ...(secondRevision.run.executionContract?.protectedPaths ?? []),
+      "src/auth.ts",
+    ]);
+    expect(manuallyEdited.executionContract?.protectedPaths).toEqual([
+      ".env",
+      "deployment",
+      "package.json",
+      "infra/secrets",
+      "src/auth.ts",
+    ]);
+    expect(runner.calls).toHaveLength(0);
+
+    await service.approveRun(run.id);
+    await expect.poll(() => runner.calls.length).toBe(1);
+    expect(runner.calls[0]?.protectedPaths).toEqual([
+      ".env",
+      "deployment",
+      "package.json",
+      "infra/secrets",
+      "src/auth.ts",
+    ]);
+    await expect(service.negotiateExecutionContract(run.id, "Change it again")).rejects
+      .toMatchObject({ statusCode: 409 });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it.each([
+    ["provider returned 429", new Error("provider returned 429")],
+    ["planner returned malformed JSON", new Error("planner returned malformed JSON")],
+    [
+      "planner returned invalid paths",
+      {
+        ...basicProposal,
+        writablePaths: ["../outside"],
+        removedProtectedPaths: [],
+      },
+    ],
+  ] as Array<[string, ContractAmendment | Error]>)(
+    "preserves the current contract exactly when negotiation fails: %s",
+    async (_failureName, amendmentResult) => {
+      const runner = new FakeRunner();
+      const planner = new FakePlanner(basicProposal, [amendmentResult]);
+      const service = await makeService(runner, {}, planner);
+      const agent = await service.createAgent({ name: "Preserved" });
+      const { run } = await service.sendMessage(agent.id, "Update authentication");
+      await service.updateExecutionContract(run.id, [
+        ...(run.executionContract?.protectedPaths ?? []),
+        "package.json",
+      ]);
+      const contractBefore = JSON.stringify(service.getRun(run.id).executionContract);
+
+      const result = await service.negotiateExecutionContract(
+        run.id,
+        "Only touch src/auth.",
+      );
+
+      expect(result).toMatchObject({
+        applied: false,
+        notice: "Unable to apply negotiation — current contract was preserved.",
+        run: { status: "awaiting_approval" },
+      });
+      expect(JSON.stringify(service.getRun(run.id).executionContract)).toBe(
+        contractBefore,
+      );
+      expect(runner.calls).toHaveLength(0);
+      await service.cancelRun(run.id);
+    },
+  );
+
+  it("removes an existing protection only through explicit structured removal intent", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner(basicProposal, [
+      {
+        ...basicProposal,
+        protectedPaths: [".env", "deployment"],
+        removedProtectedPaths: ["package.json"],
+      },
+    ]);
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Explicit removal" });
+    const { run } = await service.sendMessage(agent.id, "Update source");
+    await service.updateExecutionContract(run.id, [
+      ...(run.executionContract?.protectedPaths ?? []),
+      "package.json",
+    ]);
+
+    const result = await service.negotiateExecutionContract(
+      run.id,
+      "Remove protection from package.json.",
+    );
+
+    expect(result.run.executionContract?.protectedPaths).toEqual([
+      ".env",
+      "deployment",
+    ]);
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
   });
 
   it("amends, freezes, and passes the approved contract exactly once", async () => {

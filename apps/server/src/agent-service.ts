@@ -3,7 +3,9 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import {
   ContractPlanningError,
+  parseContractAmendment,
   parseContractProposal,
+  type ContractAmendment,
   type ContractPlanner,
   type ContractProposal,
 } from "./contract-planner.js";
@@ -20,6 +22,7 @@ import type {
   AgentRunner,
   CreateAgentInput,
   ExecutionContract,
+  ExecutionContractV1,
   Message,
   UpdateAgentInput,
 } from "./types.js";
@@ -28,9 +31,20 @@ import { WorkspaceManager } from "./workspace.js";
 const now = () => new Date().toISOString();
 export const AI_PROPOSAL_UNAVAILABLE_NOTICE =
   "AI proposal unavailable — review contract manually.";
+export const NEGOTIATION_PRESERVED_NOTICE =
+  "Unable to apply negotiation — current contract was preserved.";
+
+export interface ContractNegotiationResult {
+  run: AgentRun;
+  applied: boolean;
+  notice: string | null;
+}
 
 const unavailablePlanner: ContractPlanner = {
   async propose() {
+    throw new ContractPlanningError("Planner is unavailable");
+  },
+  async amend() {
     throw new ContractPlanningError("Planner is unavailable");
   },
 };
@@ -285,6 +299,113 @@ export class AgentService {
       run.executionContract.updatedAt = now();
       return structuredClone(run);
     });
+  }
+
+  async negotiateExecutionContract(
+    runId: string,
+    amendmentInstruction: string,
+  ): Promise<ContractNegotiationResult> {
+    const runAtStart = this.getRun(runId);
+    if (
+      runAtStart.status !== "awaiting_approval" ||
+      runAtStart.executionContract?.version !== 1
+    ) {
+      throw new HttpError(409, "Run is not awaiting negotiation on a V1 contract");
+    }
+    const contractAtStart = structuredClone(runAtStart.executionContract);
+    const serializedContractAtStart = JSON.stringify(contractAtStart);
+    const agent = this.getAgent(runAtStart.agentId);
+    const preserveCurrentContract = (): ContractNegotiationResult => {
+      const preservedRun = this.getRun(runId);
+      if (
+        preservedRun.status !== "awaiting_approval" ||
+        preservedRun.executionContract?.version !== 1
+      ) {
+        throw new HttpError(409, "Run is no longer awaiting negotiation");
+      }
+      if (JSON.stringify(preservedRun.executionContract) !== serializedContractAtStart) {
+        throw new HttpError(
+          409,
+          "Execution Contract changed while negotiation was in progress",
+        );
+      }
+      return {
+        run: preservedRun,
+        applied: false,
+        notice: NEGOTIATION_PRESERVED_NOTICE,
+      };
+    };
+
+    let amendment: ContractAmendment;
+    let protectedPaths: string[];
+    try {
+      const workspaceInventory = await this.workspaces.readInventory(
+        agent.workspacePath,
+      );
+      amendment = parseContractAmendment(
+        await this.planner.amend({
+          task: runAtStart.prompt,
+          agentInstructions: agent.instructions,
+          currentContract: contractAtStart,
+          amendmentInstruction,
+          workspaceInventory,
+        }),
+      );
+      const currentProtectedPaths = normalizeProtectedPaths(
+        contractAtStart.protectedPaths,
+      );
+      const currentProtectedSet = new Set(currentProtectedPaths);
+      if (
+        amendment.removedProtectedPaths.some(
+          (protectedPath) => !currentProtectedSet.has(protectedPath),
+        )
+      ) {
+        throw new ContractPlanningError(
+          "Planner requested removal of a path that is not currently protected",
+        );
+      }
+      const removals = new Set(amendment.removedProtectedPaths);
+      protectedPaths = normalizeProtectedPaths([
+        ...currentProtectedPaths.filter(
+          (protectedPath) => !removals.has(protectedPath),
+        ),
+        ...amendment.protectedPaths.filter(
+          (protectedPath) => !removals.has(protectedPath),
+        ),
+      ]);
+    } catch {
+      return preserveCurrentContract();
+    }
+    const { removedProtectedPaths: _removedProtectedPaths, ...revisedProposal } =
+      amendment;
+    const updatedAt = now();
+
+    const run = await this.store.mutate((database) => {
+      const storedRun = database.runs.find((item) => item.id === runId);
+      if (
+        !storedRun ||
+        storedRun.status !== "awaiting_approval" ||
+        storedRun.executionContract?.version !== 1
+      ) {
+        throw new HttpError(409, "Run is no longer awaiting negotiation");
+      }
+      if (JSON.stringify(storedRun.executionContract) !== serializedContractAtStart) {
+        throw new HttpError(
+          409,
+          "Execution Contract changed while negotiation was in progress",
+        );
+      }
+
+      Object.assign(storedRun.executionContract, revisedProposal, {
+        protectedPaths,
+        proposalSource: "ai",
+        proposalNotice: null,
+        approvedAt: null,
+        updatedAt,
+      } satisfies Partial<ExecutionContractV1>);
+      return structuredClone(storedRun);
+    });
+    return { run, applied: true, notice: null };
   }
 
   async approveRun(runId: string): Promise<AgentRun> {
