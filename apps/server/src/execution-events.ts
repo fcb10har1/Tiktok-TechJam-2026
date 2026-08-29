@@ -1,7 +1,7 @@
-import { existsSync } from "node:fs";
 import path from "node:path";
 import { isPathInsideScope } from "./protected-paths.js";
 import type { RunEvent, RunnerRequest } from "./types.js";
+import type { WorkspaceDiff } from "./workspace-manifest.js";
 
 type CommandItem = {
   id?: string;
@@ -22,7 +22,6 @@ interface CommandTarget {
 
 interface StartedCommand {
   target: CommandTarget | null;
-  targetExisted: boolean | null;
 }
 
 const PERMISSION_FAILURE =
@@ -215,12 +214,7 @@ export class ExecutionEventCollector {
     const itemKey = item.id ?? "anonymous";
     if (event.type === "item.started") {
       const target = writeTarget(item.command);
-      this.started.set(itemKey, {
-        target,
-        targetExisted: target
-          ? existsSync(path.join(this.request.workspacePath, target.path))
-          : null,
-      });
+      this.started.set(itemKey, { target });
       return;
     }
     if (item.exit_code === null || !["completed", "failed"].includes(item.status)) {
@@ -277,26 +271,6 @@ export class ExecutionEventCollector {
       return;
     }
 
-    if (
-      target?.deterministic &&
-      !failed &&
-      !PERMISSION_FAILURE.test(item.aggregated_output) &&
-      (target.writeKind !== "delete" || started?.targetExisted === true)
-    ) {
-      this.collected.push({
-        ...base,
-        kind:
-          target.writeKind === "delete"
-            ? "delete"
-            : started?.targetExisted
-              ? "modify"
-              : "create",
-        outcome: "success",
-        path: target.path,
-      });
-      return;
-    }
-
     if (PERMISSION_FAILURE.test(item.aggregated_output)) {
       this.collected.push({
         ...base,
@@ -337,6 +311,39 @@ export class ExecutionEventCollector {
     }
     return result;
   }
+}
+
+const MUTATION_KINDS = new Set<RunEvent["kind"]>([
+  "create",
+  "modify",
+  "delete",
+]);
+
+export function mergeExecutionEvidence(
+  runtimeEvents: readonly RunEvent[],
+  workspaceDiff: WorkspaceDiff,
+): RunEvent[] {
+  const workspaceEvents: RunEvent[] = workspaceDiff.mutations.map(
+    (mutation, index) => ({
+      id: "workspace-diff-" + (index + 1),
+      sequence: index + 1,
+      timestamp: workspaceDiff.capturedAt,
+      kind: mutation.kind,
+      outcome: "success",
+      path: mutation.path,
+      technical: {
+        source: "workspace-diff",
+        itemType: "workspace_manifest",
+      },
+    }),
+  );
+  const retainedRuntimeEvents = runtimeEvents.filter(
+    (event) => !MUTATION_KINDS.has(event.kind),
+  );
+  return [...workspaceEvents, ...retainedRuntimeEvents].map((event, index) => ({
+    ...event,
+    sequence: index + 1,
+  }));
 }
 
 export function verificationSummary(

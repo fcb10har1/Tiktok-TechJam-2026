@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sanitizedRunnerFailure } from "./errors.js";
-import { ExecutionEventCollector, verificationSummary } from "./execution-events.js";
+import {
+  ExecutionEventCollector,
+  mergeExecutionEvidence,
+  verificationSummary,
+} from "./execution-events.js";
 import type { RunnerRequest } from "./types.js";
 
 const temporaryDirectories: string[] = [];
@@ -75,20 +79,23 @@ describe("deterministic execution evidence", () => {
     );
     for (const line of fixture.trim().split("\n")) collector.consume(line);
 
-    expect(collector.events().map(({ kind, outcome, path: eventPath }) => ({
+    const events = collector.events();
+    expect(events.map(({ kind, outcome, path: eventPath }) => ({
       kind,
       outcome,
       path: eventPath,
     }))).toEqual([
       { kind: "command", outcome: "success", path: undefined },
-      { kind: "modify", outcome: "success", path: "src/modified.txt" },
-      { kind: "create", outcome: "success", path: "src/created.txt" },
+      { kind: "command", outcome: "success", path: undefined },
+      { kind: "command", outcome: "success", path: undefined },
       { kind: "verify", outcome: "success", path: undefined },
       { kind: "verify", outcome: "failure", path: undefined },
       { kind: "warning", outcome: undefined, path: "README.md" },
       { kind: "warning", outcome: undefined, path: ".env" },
     ]);
-    expect(verificationSummary(collector.events())).toBe("Failed");
+    expect(events[1]?.technical.command).toBeUndefined();
+    expect(events[2]?.technical.command).toBeUndefined();
+    expect(verificationSummary(events)).toBe("Failed");
   });
 
   it("distinguishes default-deny and explicitly protected authority blocks", async () => {
@@ -182,5 +189,84 @@ describe("deterministic execution evidence", () => {
     collector.consume(commandEvent("verify", "/bin/bash -lc 'node --test'", "ok", 0));
     expect(collector.events().map((item) => item.kind)).toEqual(["inspect", "verify"]);
     expect(collector.events().map((item) => item.sequence)).toEqual([1, 2]);
+  });
+
+  it("prefers workspace-diff mutations and deduplicates JSONL mutation claims", () => {
+    const runtimeEvents = [
+      {
+        id: "runtime-mutation",
+        sequence: 1,
+        timestamp: "runtime-time",
+        kind: "modify" as const,
+        outcome: "success" as const,
+        path: "src/auth.ts",
+        technical: {
+          source: "codex-jsonl" as const,
+          itemType: "command_execution" as const,
+          itemId: "item-1",
+          exitCode: 0,
+        },
+      },
+      {
+        id: "runtime-block",
+        sequence: 2,
+        timestamp: "runtime-time",
+        kind: "blocked" as const,
+        outcome: "blocked" as const,
+        path: "README.md",
+        authorityReason: "explicitly_protected" as const,
+        technical: {
+          source: "codex-jsonl" as const,
+          itemType: "command_execution" as const,
+          itemId: "item-2",
+          exitCode: 1,
+        },
+      },
+    ];
+    const merged = mergeExecutionEvidence(runtimeEvents, {
+      mutations: [
+        { kind: "modify", path: "src/auth.ts" },
+        { kind: "create", path: "src/new.ts" },
+      ],
+      status: "complete",
+      capturedAt: "post-time",
+    });
+
+    expect(merged).toMatchObject([
+      {
+        kind: "modify",
+        path: "src/auth.ts",
+        technical: { source: "workspace-diff" },
+      },
+      {
+        kind: "create",
+        path: "src/new.ts",
+        technical: { source: "workspace-diff" },
+      },
+      { kind: "blocked", path: "README.md" },
+    ]);
+    expect(merged.filter((event) => event.path === "src/auth.ts")).toHaveLength(1);
+    expect(merged.map((event) => event.sequence)).toEqual([1, 2, 3]);
+  });
+
+  it("persists no workspace contents or digests in diff events", () => {
+    const events = mergeExecutionEvidence([], {
+      mutations: [{ kind: "modify", path: "src/auth.ts" }],
+      status: "complete",
+      capturedAt: "post-time",
+    });
+    const persisted = JSON.stringify(events);
+    expect(persisted).not.toContain("ORIGINAL FILE CONTENT");
+    expect(persisted).not.toContain("sha256");
+    expect(events).toEqual([
+      expect.objectContaining({
+        kind: "modify",
+        path: "src/auth.ts",
+        technical: {
+          source: "workspace-diff",
+          itemType: "workspace_manifest",
+        },
+      }),
+    ]);
   });
 });

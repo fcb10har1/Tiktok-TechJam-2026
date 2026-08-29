@@ -33,6 +33,7 @@ describe("JsonStore", () => {
         startedAt: "2026-08-30T00:00:00.000Z",
         completedAt: "2026-08-30T00:00:01.000Z",
         createdAt: "2026-08-30T00:00:00.000Z",
+        workspaceDiffStatus: "complete",
         events: [
           {
             id: "codex-item-1",
@@ -55,6 +56,7 @@ describe("JsonStore", () => {
     expect(restarted.snapshot().runs[0]?.events).toEqual([
       expect.objectContaining({ kind: "verify", outcome: "success" }),
     ]);
+    expect(restarted.snapshot().runs[0]?.workspaceDiffStatus).toBe("complete");
   });
 
   it("does not publish a mutation in memory when persistence fails", async () => {

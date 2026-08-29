@@ -1316,6 +1316,44 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
+.evidence-command-log {
+  margin-top: 12px;
+  padding-top: 9px;
+  border-top: 1px solid #dde1dc;
+  color: #666861;
+  font-size: 9px;
+}
+
+.evidence-command-log summary,
+.changed-file-details summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.evidence-command-log ol {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.evidence-command-log li {
+  line-height: 1.45;
+}
+
+.evidence-command-log li span {
+  display: block;
+  margin-top: 2px;
+  color: #85867f;
+}
+
+.evidence-net-state-note {
+  margin: 11px 0 0;
+  color: #7a7b75;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
 .evidence-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1343,6 +1381,27 @@ textarea:focus {
 .evidence-summary strong {
   overflow-wrap: anywhere;
   font-size: 10px;
+}
+
+.evidence-summary small {
+  color: #8a7452;
+  font-size: 8px;
+}
+
+.changed-file-details {
+  color: #62635e;
+  font-size: 8px;
+}
+
+.changed-file-details section {
+  margin-top: 7px;
+}
+
+.changed-file-details ul {
+  display: grid;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding-left: 15px;
 }
 
 .composer {

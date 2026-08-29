@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -173,9 +173,8 @@ describe("Agent lifecycle", () => {
         id: "codex-item-1",
         sequence: 1,
         timestamp: "2026-08-30T00:00:00.000Z",
-        kind: "modify",
+        kind: "command",
         outcome: "success",
-        path: "src/app.ts",
         technical: {
           source: "codex-jsonl",
           itemType: "command_execution",
@@ -191,9 +190,59 @@ describe("Agent lifecycle", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
 
     expect(service.getRun(run.id).events).toEqual([
-      expect.objectContaining({ kind: "modify", path: "src/app.ts" }),
+      expect.objectContaining({ kind: "command" }),
     ]);
     expect(runner.calls[0]).toMatchObject({
+      writablePaths: ["src/**"],
+      protectedPaths: [".env", "deployment"],
+    });
+  });
+
+  it("persists a successful resulting workspace modification from PRE and POST", async () => {
+    const calls: RunnerRequest[] = [];
+    const runner: AgentRunner = {
+      async run(request) {
+        calls.push(structuredClone(request));
+        await writeFile(
+          path.join(request.workspacePath, "src", "auth.ts"),
+          "// OBSERVABILITY TEST\n",
+        );
+        return {
+          output: "Done",
+          threadId: "workspace-diff-thread",
+          usage: null,
+          events: [],
+        };
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Successful mutation" });
+    await mkdir(path.join(agent.workspacePath, "src"));
+    await writeFile(path.join(agent.workspacePath, "src", "auth.ts"), "ORIGINAL\n");
+    const { run } = await service.sendMessage(agent.id, "change auth");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(service.getRun(run.id)).toMatchObject({
+      workspaceDiffStatus: "complete",
+      events: [
+        {
+          kind: "modify",
+          path: "src/auth.ts",
+          technical: {
+            source: "workspace-diff",
+            itemType: "workspace_manifest",
+          },
+        },
+      ],
+    });
+    expect(calls[0]).toMatchObject({
       writablePaths: ["src/**"],
       protectedPaths: [".env", "deployment"],
     });
@@ -237,6 +286,93 @@ describe("Agent lifecycle", () => {
         authorityReason: "explicitly_protected",
       }),
     ]);
+  });
+
+  it("persists workspace-diff mutations made before a later runner failure", async () => {
+    const runner: AgentRunner = {
+      async run(request) {
+        await writeFile(path.join(request.workspacePath, "src", "auth.ts"), "AFTER\n");
+        throw new RunExecutionError("Runtime failed", [
+          {
+            id: "codex-blocked",
+            sequence: 1,
+            timestamp: "2026-08-30T00:00:00.000Z",
+            kind: "blocked",
+            outcome: "blocked",
+            path: ".env",
+            authorityReason: "explicitly_protected",
+            technical: {
+              source: "codex-jsonl",
+              itemType: "command_execution",
+              exitCode: 1,
+            },
+          },
+        ]);
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Failed mutation" });
+    await mkdir(path.join(agent.workspacePath, "src"));
+    await writeFile(path.join(agent.workspacePath, "src", "auth.ts"), "BEFORE\n");
+    const { run } = await service.sendMessage(agent.id, "change auth then fail");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+
+    expect(service.getRun(run.id)).toMatchObject({
+      workspaceDiffStatus: "complete",
+      events: [
+        {
+          kind: "modify",
+          path: "src/auth.ts",
+          technical: { source: "workspace-diff" },
+        },
+        {
+          kind: "blocked",
+          path: ".env",
+          technical: { source: "codex-jsonl" },
+        },
+      ],
+    });
+  });
+
+  it("captures PRE after authority placeholders so they are not Agent creations", async () => {
+    const planner = new FakePlanner({
+      goal: "Use prepared authority",
+      plannedActions: ["Inspect prepared targets"],
+      writablePaths: ["src/**"],
+      protectedPaths: ["src/secrets.ts"],
+      riskLevel: "low",
+      rationale: null,
+    });
+    const service = await makeService(new FakeRunner(), {}, planner);
+    const agent = await service.createAgent({ name: "Prepared evidence" });
+    const { run } = await service.sendMessage(agent.id, "inspect placeholders");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    const completed = service.getRun(run.id);
+    expect(completed.authorityPreparations).toEqual([
+      {
+        path: "src",
+        kind: "directory",
+        purpose: "writable",
+        existedBeforeRun: false,
+      },
+      {
+        path: "src/secrets.ts",
+        kind: "file",
+        purpose: "protected",
+        existedBeforeRun: false,
+      },
+    ]);
+    expect(completed.events?.filter((event) => event.kind === "create")).toEqual([]);
+    expect(completed.workspaceDiffStatus).toBe("complete");
   });
 
   it("triggers preflight planning and persists a validated AI proposal", async () => {

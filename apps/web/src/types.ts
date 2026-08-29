@@ -37,8 +37,8 @@ export interface RunEvent {
   path?: string;
   authorityReason?: "explicitly_protected" | "outside_write_authority";
   technical: {
-    source: "codex-jsonl";
-    itemType: "command_execution";
+    source: "codex-jsonl" | "workspace-diff";
+    itemType: "command_execution" | "workspace_manifest";
     itemId?: string;
     exitCode?: number;
     command?: string;
@@ -113,6 +113,7 @@ export interface AgentRun {
     existedBeforeRun: false;
   }>;
   events?: RunEvent[];
+  workspaceDiffStatus?: "complete" | "partial" | "unavailable";
 }
 
 export interface SystemInfo {

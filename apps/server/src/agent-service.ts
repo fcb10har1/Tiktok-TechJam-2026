@@ -11,6 +11,7 @@ import {
   type ContractProposal,
 } from "./contract-planner.js";
 import { HttpError, RunCancelledError, RunExecutionError } from "./errors.js";
+import { mergeExecutionEvidence } from "./execution-events.js";
 import {
   DEFAULT_PROTECTED_PATHS,
   InvalidProtectedPathError,
@@ -26,6 +27,8 @@ import type {
   ExecutionContract,
   ExecutionContractV1,
   Message,
+  RunEvent,
+  RunnerResult,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -35,6 +38,11 @@ import {
   validateWorkspaceAuthorityDraft,
   WorkspaceAuthorityError,
 } from "./workspace-authority.js";
+import {
+  captureWorkspaceManifest,
+  compareWorkspaceManifests,
+  type WorkspaceDiffStatus,
+} from "./workspace-manifest.js";
 
 const now = () => new Date().toISOString();
 export const AI_PROPOSAL_UNAVAILABLE_NOTICE =
@@ -763,6 +771,8 @@ export class AgentService {
   }
 
   private async executeRun(agentAtStart: Agent, runId: string): Promise<void> {
+    let executionEvents: RunEvent[] = [];
+    let workspaceDiffStatus: WorkspaceDiffStatus | undefined;
     try {
       const run = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === runId);
@@ -788,15 +798,36 @@ export class AgentService {
         writablePaths: run.executionContract.writablePaths,
         protectedPaths: run.executionContract.protectedPaths,
       });
-      const result = await this.runner.run({
-        agentId: agentAtStart.id,
-        workspacePath: agentAtStart.workspacePath,
-        prompt: run.prompt,
-        threadId: agentAtStart.codexThreadId,
-        writablePaths: run.executionContract.writablePaths,
-        protectedPaths: run.executionContract.protectedPaths,
-        authorityPlan,
-      });
+      const beforeManifest = await captureWorkspaceManifest(
+        agentAtStart.workspacePath,
+      );
+      let result: RunnerResult;
+      try {
+        result = await this.runner.run({
+          agentId: agentAtStart.id,
+          workspacePath: agentAtStart.workspacePath,
+          prompt: run.prompt,
+          threadId: agentAtStart.codexThreadId,
+          writablePaths: run.executionContract.writablePaths,
+          protectedPaths: run.executionContract.protectedPaths,
+          authorityPlan,
+        });
+        executionEvents = result.events ?? [];
+      } catch (error) {
+        executionEvents =
+          error instanceof RunExecutionError ? error.events : executionEvents;
+        throw error;
+      } finally {
+        const afterManifest = await captureWorkspaceManifest(
+          agentAtStart.workspacePath,
+        );
+        const workspaceDiff = compareWorkspaceManifests(
+          beforeManifest,
+          afterManifest,
+        );
+        workspaceDiffStatus = workspaceDiff.status;
+        executionEvents = mergeExecutionEvidence(executionEvents, workspaceDiff);
+      }
       const completedAt = now();
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === runId);
@@ -805,7 +836,10 @@ export class AgentService {
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
-        storedRun.events = result.events ?? [];
+        storedRun.events = executionEvents;
+        if (workspaceDiffStatus) {
+          storedRun.workspaceDiffStatus = workspaceDiffStatus;
+        }
         storedRun.completedAt = completedAt;
         database.messages.push({
           id: randomUUID(),
@@ -830,8 +864,10 @@ export class AgentService {
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
-          storedRun.events =
-            error instanceof RunExecutionError ? error.events : storedRun.events ?? [];
+          storedRun.events = executionEvents;
+          if (workspaceDiffStatus) {
+            storedRun.workspaceDiffStatus = workspaceDiffStatus;
+          }
           storedRun.completedAt = completedAt;
         }
         if (agent) {

@@ -66,6 +66,25 @@ function eventDescription(event: RunEvent): string {
   return event.outcome === "failure" ? "Command failed" : "Ran a command";
 }
 
+function changedFilesLabel(events: readonly RunEvent[], status: AgentRun["workspaceDiffStatus"]): string {
+  const changes = events.filter(
+    (event) =>
+      event.technical.source === "workspace-diff" &&
+      ["create", "modify", "delete"].includes(event.kind),
+  );
+  const labels = [
+    ["create", "created"],
+    ["modify", "modified"],
+    ["delete", "deleted"],
+  ] as const;
+  const parts = labels.flatMap(([kind, label]) => {
+    const count = changes.filter((event) => event.kind === kind).length;
+    return count > 0 ? [count + " " + label] : [];
+  });
+  if (parts.length > 0) return parts.join(" · ");
+  return status === "complete" ? "No resulting changes" : "Not observed";
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -98,6 +117,18 @@ export default function App() {
   const selected = useMemo(
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
+  );
+  const executionEvents = activeRun?.events ?? [];
+  const primaryExecutionEvents = executionEvents.filter(
+    (event) => event.kind !== "command" || event.outcome === "failure",
+  );
+  const genericCommandEvents = executionEvents.filter(
+    (event) => event.kind === "command" && event.outcome !== "failure",
+  );
+  const workspaceMutationEvents = executionEvents.filter(
+    (event) =>
+      event.technical.source === "workspace-diff" &&
+      ["create", "modify", "delete"].includes(event.kind),
   );
 
   const refreshAgents = useCallback(async () => {
@@ -1034,7 +1065,7 @@ export default function App() {
                           <span className="eyebrow">Execution evidence</span>
                           <h3>Deterministic post-run record</h3>
                         </div>
-                        <span className="evidence-source">Codex Runtime JSONL</span>
+                        <span className="evidence-source">Runtime + workspace evidence</span>
                       </div>
                       <section className="evidence-planned">
                         <strong>Planned</strong>
@@ -1053,9 +1084,9 @@ export default function App() {
                       </section>
                       <section className="evidence-executed">
                         <strong>Executed evidence</strong>
-                        {(activeRun.events ?? []).length > 0 ? (
+                        {primaryExecutionEvents.length > 0 ? (
                           <ol className="evidence-timeline">
-                            {(activeRun.events ?? []).map((event) => (
+                            {primaryExecutionEvents.map((event) => (
                               <li key={event.id} className={"evidence-event evidence-" + event.kind}>
                                 <span className="evidence-marker" aria-hidden="true" />
                                 <div>
@@ -1080,36 +1111,83 @@ export default function App() {
                         ) : (
                           <p className="evidence-not-observed">Not observed</p>
                         )}
+                        {genericCommandEvents.length > 0 && (
+                          <details className="evidence-command-log">
+                            <summary>
+                              Technical command evidence ({genericCommandEvents.length})
+                            </summary>
+                            <ol>
+                              {genericCommandEvents.map((event) => (
+                                <li key={"technical-" + event.id}>
+                                  <code>
+                                    {event.technical.command ?? "Unclassified command"}
+                                  </code>
+                                  {event.technical.exitCode !== undefined && (
+                                    <span>Exit code {event.technical.exitCode}</span>
+                                  )}
+                                </li>
+                              ))}
+                            </ol>
+                          </details>
+                        )}
+                        <p className="evidence-net-state-note">
+                          Workspace changes show the resulting PRE/POST state. Transient
+                          writes restored before completion are not shown.
+                        </p>
                       </section>
                       <div className="evidence-summary">
                         <div>
                           <span>Changed files</span>
                           <strong>
-                            {(activeRun.events ?? []).some((event) =>
-                              ["create", "modify", "delete"].includes(event.kind),
-                            )
-                              ? Array.from(
-                                  new Set(
-                                    (activeRun.events ?? [])
-                                      .filter((event) =>
-                                        ["create", "modify", "delete"].includes(event.kind),
-                                      )
-                                      .map((event) => event.path)
-                                      .filter((value): value is string => Boolean(value)),
-                                  ),
-                                ).join(", ")
-                              : "Not observed"}
+                            {changedFilesLabel(
+                              executionEvents,
+                              activeRun.workspaceDiffStatus,
+                            )}
                           </strong>
+                          {workspaceMutationEvents.length > 0 && (
+                            <details className="changed-file-details">
+                              <summary>View files</summary>
+                              {(["create", "modify", "delete"] as const).map(
+                                (kind) => {
+                                  const paths = workspaceMutationEvents
+                                    .filter((event) => event.kind === kind)
+                                    .map((event) => event.path)
+                                    .filter((value): value is string => Boolean(value));
+                                  return paths.length > 0 ? (
+                                    <section key={kind}>
+                                      <b>
+                                        {kind === "create"
+                                          ? "Created"
+                                          : kind === "modify"
+                                            ? "Modified"
+                                            : "Deleted"}
+                                      </b>
+                                      <ul>
+                                        {paths.map((workspacePath) => (
+                                          <li key={kind + "-" + workspacePath}>
+                                            <code>{workspacePath}</code>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </section>
+                                  ) : null;
+                                },
+                              )}
+                            </details>
+                          )}
+                          {activeRun.workspaceDiffStatus === "partial" && (
+                            <small>Partial manifest coverage.</small>
+                          )}
                         </div>
                         <div>
                           <span>Verification</span>
-                          <strong>{verificationStatus(activeRun.events ?? [])}</strong>
+                          <strong>{verificationStatus(executionEvents)}</strong>
                         </div>
                         <div>
                           <span>Authority blocks</span>
                           <strong>
-                            {(activeRun.events ?? []).some((event) => event.kind === "blocked")
-                              ? String((activeRun.events ?? []).filter((event) => event.kind === "blocked").length)
+                            {executionEvents.some((event) => event.kind === "blocked")
+                              ? String(executionEvents.filter((event) => event.kind === "blocked").length)
                               : "Not observed"}
                           </strong>
                         </div>
