@@ -36,6 +36,35 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
+export type RunEventKind =
+  | "inspect"
+  | "create"
+  | "modify"
+  | "delete"
+  | "command"
+  | "verify"
+  | "blocked"
+  | "warning";
+
+export type RunEventOutcome = "success" | "failure" | "blocked";
+
+export interface RunEvent {
+  id: string;
+  sequence: number;
+  timestamp: string;
+  kind: RunEventKind;
+  outcome?: RunEventOutcome;
+  path?: string;
+  authorityReason?: "explicitly_protected" | "outside_write_authority";
+  technical: {
+    source: "codex-jsonl";
+    itemType: "command_execution";
+    itemId?: string;
+    exitCode?: number;
+    command?: string;
+  };
+}
+
 export interface ExecutionContractV0 {
   version: 0;
   protectedPaths: string[];
@@ -74,6 +103,7 @@ export interface AgentRun {
   createdAt: string;
   executionContract?: ExecutionContract;
   authorityPreparations?: AuthorityPreparation[];
+  events?: RunEvent[];
 }
 
 export type AuthorityTargetKind = "file" | "directory";
@@ -120,6 +150,7 @@ export interface RunnerResult {
   output: string;
   threadId: string | null;
   usage: RunUsage | null;
+  events?: RunEvent[];
 }
 
 export interface RunnerRequest {

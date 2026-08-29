@@ -18,6 +18,33 @@ export type ContractPlanningFailureCode =
   | "path_invalid"
   | "provider_error";
 
+export type RunEventKind =
+  | "inspect"
+  | "create"
+  | "modify"
+  | "delete"
+  | "command"
+  | "verify"
+  | "blocked"
+  | "warning";
+
+export interface RunEvent {
+  id: string;
+  sequence: number;
+  timestamp: string;
+  kind: RunEventKind;
+  outcome?: "success" | "failure" | "blocked";
+  path?: string;
+  authorityReason?: "explicitly_protected" | "outside_write_authority";
+  technical: {
+    source: "codex-jsonl";
+    itemType: "command_execution";
+    itemId?: string;
+    exitCode?: number;
+    command?: string;
+  };
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -85,6 +112,7 @@ export interface AgentRun {
     purpose: "writable" | "protected";
     existedBeforeRun: false;
   }>;
+  events?: RunEvent[];
 }
 
 export interface SystemInfo {

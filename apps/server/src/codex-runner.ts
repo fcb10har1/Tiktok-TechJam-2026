@@ -2,7 +2,12 @@ import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { RunCancelledError } from "./errors.js";
+import {
+  RunCancelledError,
+  RunExecutionError,
+  sanitizedRunnerFailure,
+} from "./errors.js";
+import { ExecutionEventCollector } from "./execution-events.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -155,6 +160,11 @@ export class CodexRunner implements AgentRunner {
       usage: null,
       errors: [],
     };
+    const eventCollector = new ExecutionEventCollector(request);
+    const consumeLine = (line: string) => {
+      parseCodexEventLine(line, parsed);
+      eventCollector.consume(line);
+    };
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
@@ -171,7 +181,7 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed);
+          consumeLine(line);
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -196,7 +206,7 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed);
+        consumeLine(stdout.trim());
       }
       if (active.cancelled) {
         throw new RunCancelledError();
@@ -219,7 +229,14 @@ export class CodexRunner implements AgentRunner {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
+        events: eventCollector.events(),
       };
+    } catch (error) {
+      if (error instanceof RunCancelledError) throw error;
+      throw new RunExecutionError(
+        sanitizedRunnerFailure(error),
+        eventCollector.events(),
+      );
     } finally {
       clearTimeout(timeout);
       if (active.forceKillTimer) clearTimeout(active.forceKillTimer);

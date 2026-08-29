@@ -10,7 +10,7 @@ import {
   type ContractPlanner,
   type ContractProposal,
 } from "./contract-planner.js";
-import { HttpError, RunCancelledError } from "./errors.js";
+import { HttpError, RunCancelledError, RunExecutionError } from "./errors.js";
 import {
   DEFAULT_PROTECTED_PATHS,
   InvalidProtectedPathError,
@@ -294,6 +294,7 @@ export class AgentService {
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
+      events: [],
       executionContract: this.buildExecutionContract(
         prompt,
         proposal,
@@ -804,6 +805,7 @@ export class AgentService {
         storedRun.status = "completed";
         storedRun.output = result.output;
         storedRun.usage = result.usage;
+        storedRun.events = result.events ?? [];
         storedRun.completedAt = completedAt;
         database.messages.push({
           id: randomUUID(),
@@ -828,6 +830,8 @@ export class AgentService {
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
+          storedRun.events =
+            error instanceof RunExecutionError ? error.events : storedRun.events ?? [];
           storedRun.completedAt = completedAt;
         }
         if (agent) {

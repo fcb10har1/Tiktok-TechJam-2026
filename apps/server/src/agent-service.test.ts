@@ -12,12 +12,15 @@ import type {
   ContractProposal,
 } from "./contract-planner.js";
 import { ContractPlanningError } from "./contract-planner.js";
+import { RunExecutionError } from "./errors.js";
 import { JsonStore } from "./store.js";
-import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
+import type { AgentRunner, RunEvent, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 class FakeRunner implements AgentRunner {
   readonly calls: RunnerRequest[] = [];
+
+  constructor(private readonly events: RunEvent[] = []) {}
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
     this.calls.push(structuredClone(request));
@@ -25,6 +28,7 @@ class FakeRunner implements AgentRunner {
       output: "Completed: " + request.prompt,
       threadId: request.threadId ?? "fake-thread",
       usage: { inputTokens: 12, outputTokens: 5 },
+      events: structuredClone(this.events),
     };
   }
   async cancel(): Promise<boolean> {
@@ -160,6 +164,78 @@ describe("Agent lifecycle", () => {
         purpose: "writable",
         existedBeforeRun: false,
       },
+    ]);
+  });
+
+  it("persists deterministic runner evidence without changing approved authority", async () => {
+    const runner = new FakeRunner([
+      {
+        id: "codex-item-1",
+        sequence: 1,
+        timestamp: "2026-08-30T00:00:00.000Z",
+        kind: "modify",
+        outcome: "success",
+        path: "src/app.ts",
+        technical: {
+          source: "codex-jsonl",
+          itemType: "command_execution",
+          itemId: "item-1",
+          exitCode: 0,
+        },
+      },
+    ]);
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Observable" });
+    const { run } = await service.sendMessage(agent.id, "change the app");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(service.getRun(run.id).events).toEqual([
+      expect.objectContaining({ kind: "modify", path: "src/app.ts" }),
+    ]);
+    expect(runner.calls[0]).toMatchObject({
+      writablePaths: ["src/**"],
+      protectedPaths: [".env", "deployment"],
+    });
+  });
+
+  it("persists evidence carried by a failed runner", async () => {
+    const runner: AgentRunner = {
+      async run() {
+        throw new RunExecutionError("Runtime failed", [
+          {
+            id: "codex-blocked",
+            sequence: 1,
+            timestamp: "2026-08-30T00:00:00.000Z",
+            kind: "blocked",
+            outcome: "blocked",
+            path: ".env",
+            authorityReason: "explicitly_protected",
+            technical: {
+              source: "codex-jsonl",
+              itemType: "command_execution",
+              exitCode: 1,
+            },
+          },
+        ]);
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Failed observable" });
+    const { run } = await service.sendMessage(agent.id, "try a protected write");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+    expect(service.getRun(run.id).events).toEqual([
+      expect.objectContaining({
+        kind: "blocked",
+        authorityReason: "explicitly_protected",
+      }),
     ]);
   });
 

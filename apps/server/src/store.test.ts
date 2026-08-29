@@ -15,6 +15,48 @@ afterEach(async () => {
 });
 
 describe("JsonStore", () => {
+  it("reloads persisted execution events", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-events-"));
+    temporaryDirectories.push(root);
+    const filePath = path.join(root, "db.json");
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    await store.mutate((database) => {
+      database.runs.push({
+        id: "run-1",
+        agentId: "agent-1",
+        status: "completed",
+        prompt: "test",
+        output: "done",
+        error: null,
+        usage: null,
+        startedAt: "2026-08-30T00:00:00.000Z",
+        completedAt: "2026-08-30T00:00:01.000Z",
+        createdAt: "2026-08-30T00:00:00.000Z",
+        events: [
+          {
+            id: "codex-item-1",
+            sequence: 1,
+            timestamp: "2026-08-30T00:00:00.500Z",
+            kind: "verify",
+            outcome: "success",
+            technical: {
+              source: "codex-jsonl",
+              itemType: "command_execution",
+              exitCode: 0,
+            },
+          },
+        ],
+      });
+    });
+
+    const restarted = new JsonStore(filePath);
+    await restarted.initialize();
+    expect(restarted.snapshot().runs[0]?.events).toEqual([
+      expect.objectContaining({ kind: "verify", outcome: "success" }),
+    ]);
+  });
+
   it("does not publish a mutation in memory when persistence fails", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
     temporaryDirectories.push(root);

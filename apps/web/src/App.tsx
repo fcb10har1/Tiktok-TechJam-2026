@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type { Agent, AgentRun, Message, RunEvent, SystemInfo } from "./types";
 
 const starterPrompts = [
   "Create a small TypeScript CLI that prints a weather summary from sample JSON.",
@@ -33,6 +33,37 @@ function StatusPill({ status, label }: { status: Agent["status"]; label?: string
 
 function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
+}
+
+function verificationStatus(events: readonly RunEvent[]): "Passed" | "Failed" | "Not observed" {
+  const verificationEvents = events.filter((event) => event.kind === "verify");
+  if (verificationEvents.length === 0) return "Not observed";
+  return verificationEvents.some((event) => event.outcome === "failure")
+    ? "Failed"
+    : "Passed";
+}
+
+function eventDescription(event: RunEvent): string {
+  if (event.kind === "inspect") return "Inspected " + event.path;
+  if (event.kind === "create") return "Created " + event.path;
+  if (event.kind === "modify") return "Modified " + event.path;
+  if (event.kind === "delete") return "Deleted " + event.path;
+  if (event.kind === "verify") {
+    return event.outcome === "success" ? "Verification passed" : "Verification failed";
+  }
+  if (event.kind === "blocked") {
+    const reason =
+      event.authorityReason === "explicitly_protected"
+        ? "Explicitly protected"
+        : "Outside approved write authority";
+    return "Blocked write to " + event.path + " — " + reason;
+  }
+  if (event.kind === "warning") {
+    return event.path
+      ? "Permission failure observed for " + event.path + "; authority attribution was inconclusive"
+      : "Permission failure observed; authority attribution was inconclusive";
+  }
+  return event.outcome === "failure" ? "Command failed" : "Ran a command";
 }
 
 export default function App() {
@@ -995,6 +1026,96 @@ export default function App() {
                     </div>
                   </article>
                 )}
+                {activeRun &&
+                  ["completed", "failed", "cancelled"].includes(activeRun.status) && (
+                    <article className="execution-evidence">
+                      <div className="execution-evidence-header">
+                        <div>
+                          <span className="eyebrow">Execution evidence</span>
+                          <h3>Deterministic post-run record</h3>
+                        </div>
+                        <span className="evidence-source">Codex Runtime JSONL</span>
+                      </div>
+                      <section className="evidence-planned">
+                        <strong>Planned</strong>
+                        {activeRun.executionContract?.version === 1 ? (
+                          <ol>
+                            {activeRun.executionContract.plannedActions.map(
+                              (action, index) => (
+                                <li key={index + "-planned-" + action}>{action}</li>
+                              ),
+                            )}
+                          </ol>
+                        ) : (
+                          <p>{activeRun.prompt}</p>
+                        )}
+                        <small>Approved intent; this is not proof that an action occurred.</small>
+                      </section>
+                      <section className="evidence-executed">
+                        <strong>Executed evidence</strong>
+                        {(activeRun.events ?? []).length > 0 ? (
+                          <ol className="evidence-timeline">
+                            {(activeRun.events ?? []).map((event) => (
+                              <li key={event.id} className={"evidence-event evidence-" + event.kind}>
+                                <span className="evidence-marker" aria-hidden="true" />
+                                <div>
+                                  <p>{eventDescription(event)}</p>
+                                  <details>
+                                    <summary>Technical details</summary>
+                                    <dl>
+                                      <div><dt>Source</dt><dd>{event.technical.source}</dd></div>
+                                      <div><dt>Item type</dt><dd>{event.technical.itemType}</dd></div>
+                                      {event.technical.exitCode !== undefined && (
+                                        <div><dt>Exit code</dt><dd>{event.technical.exitCode}</dd></div>
+                                      )}
+                                      {event.technical.command && (
+                                        <div><dt>Command</dt><dd><code>{event.technical.command}</code></dd></div>
+                                      )}
+                                    </dl>
+                                  </details>
+                                </div>
+                              </li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p className="evidence-not-observed">Not observed</p>
+                        )}
+                      </section>
+                      <div className="evidence-summary">
+                        <div>
+                          <span>Changed files</span>
+                          <strong>
+                            {(activeRun.events ?? []).some((event) =>
+                              ["create", "modify", "delete"].includes(event.kind),
+                            )
+                              ? Array.from(
+                                  new Set(
+                                    (activeRun.events ?? [])
+                                      .filter((event) =>
+                                        ["create", "modify", "delete"].includes(event.kind),
+                                      )
+                                      .map((event) => event.path)
+                                      .filter((value): value is string => Boolean(value)),
+                                  ),
+                                ).join(", ")
+                              : "Not observed"}
+                          </strong>
+                        </div>
+                        <div>
+                          <span>Verification</span>
+                          <strong>{verificationStatus(activeRun.events ?? [])}</strong>
+                        </div>
+                        <div>
+                          <span>Authority blocks</span>
+                          <strong>
+                            {(activeRun.events ?? []).some((event) => event.kind === "blocked")
+                              ? String((activeRun.events ?? []).filter((event) => event.kind === "blocked").length)
+                              : "Not observed"}
+                          </strong>
+                        </div>
+                      </div>
+                    </article>
+                  )}
                 {activeRun?.status === "failed" && (
                   <article className="run-error">
                     <strong>Run failed</strong>

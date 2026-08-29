@@ -2,7 +2,12 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
-import { RunCancelledError } from "./errors.js";
+import {
+  RunCancelledError,
+  RunExecutionError,
+  sanitizedRunnerFailure,
+} from "./errors.js";
+import { ExecutionEventCollector } from "./execution-events.js";
 import type {
   AuthorityMount,
   AgentRunner,
@@ -214,6 +219,11 @@ export class ContainerCodexRunner implements AgentRunner {
       usage: null,
       errors: [],
     };
+    const eventCollector = new ExecutionEventCollector(request);
+    const consumeLine = (line: string) => {
+      parseCodexEventLine(line, parsed);
+      eventCollector.consume(line);
+    };
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
@@ -229,7 +239,7 @@ export class ContainerCodexRunner implements AgentRunner {
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed);
+        for (const line of lines) consumeLine(line);
       } else {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
@@ -250,7 +260,7 @@ export class ContainerCodexRunner implements AgentRunner {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed);
+      if (stdout.trim()) consumeLine(stdout.trim());
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
@@ -270,7 +280,18 @@ export class ContainerCodexRunner implements AgentRunner {
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) throw new Error("Codex completed without an agent message");
-      return { output, threadId: parsed.threadId, usage: parsed.usage };
+      return {
+        output,
+        threadId: parsed.threadId,
+        usage: parsed.usage,
+        events: eventCollector.events(),
+      };
+    } catch (error) {
+      if (error instanceof RunCancelledError) throw error;
+      throw new RunExecutionError(
+        sanitizedRunnerFailure(error),
+        eventCollector.events(),
+      );
     } finally {
       clearTimeout(timeout);
       this.active.delete(request.agentId);
