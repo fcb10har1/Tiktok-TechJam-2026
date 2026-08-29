@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
+import {
+  ContractPlanningError,
+  parseContractProposal,
+  type ContractPlanner,
+  type ContractProposal,
+} from "./contract-planner.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import {
   DEFAULT_PROTECTED_PATHS,
@@ -13,12 +19,21 @@ import type {
   AgentRun,
   AgentRunner,
   CreateAgentInput,
+  ExecutionContract,
   Message,
   UpdateAgentInput,
 } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
+export const AI_PROPOSAL_UNAVAILABLE_NOTICE =
+  "AI proposal unavailable — review contract manually.";
+
+const unavailablePlanner: ContractPlanner = {
+  async propose() {
+    throw new ContractPlanningError("Planner is unavailable");
+  },
+};
 
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
@@ -29,6 +44,7 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly planner: ContractPlanner = unavailablePlanner,
   ) {}
 
   async initialize(): Promise<void> {
@@ -169,6 +185,39 @@ export class AgentService {
         "Ark is not configured. Set ARK_API_KEY and ARK_MODEL, then restart.",
       );
     }
+    const agentForPlanning = this.getAgent(agentId);
+    if (agentForPlanning.status === "stopped") {
+      throw new HttpError(409, "Start the Agent before sending a message");
+    }
+    if (agentForPlanning.status === "busy") {
+      throw new HttpError(409, "This Agent is already running");
+    }
+
+    let proposal: ContractProposal | null = null;
+    try {
+      const workspaceInventory = await this.workspaces.readInventory(
+        agentForPlanning.workspacePath,
+      );
+      const validatedProposal = parseContractProposal(
+        await this.planner.propose({
+          task: prompt,
+          agentInstructions: agentForPlanning.instructions,
+          workspaceInventory,
+        }),
+      );
+      proposal = {
+        ...validatedProposal,
+        protectedPaths: normalizeProtectedPaths([
+          ...new Set([
+            ...DEFAULT_PROTECTED_PATHS,
+            ...validatedProposal.protectedPaths,
+          ]),
+        ]),
+      };
+    } catch {
+      proposal = null;
+    }
+
     const timestamp = now();
     const runId = randomUUID();
     const run: AgentRun = {
@@ -182,12 +231,7 @@ export class AgentService {
       startedAt: null,
       completedAt: null,
       createdAt: timestamp,
-      executionContract: {
-        version: 0,
-        protectedPaths: [...DEFAULT_PROTECTED_PATHS],
-        approvedAt: null,
-        updatedAt: timestamp,
-      },
+      executionContract: this.buildExecutionContract(prompt, proposal, timestamp),
     };
     const message: Message = {
       id: randomUUID(),
@@ -247,7 +291,7 @@ export class AgentService {
     if (this.config.runtimeProvider !== "container") {
       throw new HttpError(
         409,
-        "Execution Contract v0 requires the container Runtime provider",
+        "Execution Contracts require the container Runtime provider",
       );
     }
     const approvedAt = now();
@@ -328,6 +372,41 @@ export class AgentService {
         }
       })
       .catch(() => undefined);
+  }
+
+  private buildExecutionContract(
+    prompt: string,
+    proposal: ContractProposal | null,
+    timestamp: string,
+  ): ExecutionContract {
+    if (!proposal) {
+      return {
+        version: 1,
+        goal: prompt,
+        plannedActions: [
+          "Review the task and workspace before making changes",
+          "Define the intended writable scope manually",
+          "Verify the result after execution",
+        ],
+        writablePaths: [],
+        protectedPaths: [...DEFAULT_PROTECTED_PATHS],
+        riskLevel: "medium",
+        rationale: null,
+        proposalSource: "fallback",
+        proposalNotice: AI_PROPOSAL_UNAVAILABLE_NOTICE,
+        approvedAt: null,
+        updatedAt: timestamp,
+      };
+    }
+
+    return {
+      version: 1,
+      ...proposal,
+      proposalSource: "ai",
+      proposalNotice: null,
+      approvedAt: null,
+      updatedAt: timestamp,
+    };
   }
 
   private async executeRun(agentAtStart: Agent, runId: string): Promise<void> {

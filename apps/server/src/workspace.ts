@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
@@ -60,6 +60,35 @@ export class WorkspaceManager {
       .filter((line, index, lines) => !(line === "" && lines[index - 1] === ""))
       .join("\n");
     await writeFile(path.join(agent.workspacePath, "AGENTS.md"), content, "utf8");
+  }
+
+  async readInventory(workspacePath: string): Promise<string[]> {
+    const ignoredDirectories = new Set([".codex", ".git", "dist", "node_modules"]);
+    const inventory: string[] = [];
+    const maximumDepth = 4;
+    const maximumEntries = 200;
+
+    const visit = async (directory: string, relativeDirectory: string, depth: number) => {
+      if (inventory.length >= maximumEntries) return;
+      const entries = await readdir(directory, { withFileTypes: true });
+      entries.sort((left, right) => left.name.localeCompare(right.name));
+      for (const entry of entries) {
+        if (inventory.length >= maximumEntries) return;
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
+
+        const relativePath = relativeDirectory
+          ? relativeDirectory + "/" + entry.name
+          : entry.name;
+        inventory.push(entry.isDirectory() ? relativePath + "/" : relativePath);
+        if (entry.isDirectory() && depth < maximumDepth) {
+          await visit(path.join(directory, entry.name), relativePath, depth + 1);
+        }
+      }
+    };
+
+    await visit(workspacePath, "", 1);
+    return inventory;
   }
 
   async archive(agent: Agent): Promise<string> {

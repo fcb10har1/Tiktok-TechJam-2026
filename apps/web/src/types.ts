@@ -29,12 +29,28 @@ export interface Message {
   createdAt: string;
 }
 
-export interface ExecutionContract {
+export interface ExecutionContractV0 {
   version: 0;
   protectedPaths: string[];
   approvedAt: string | null;
   updatedAt: string;
 }
+
+export interface ExecutionContractV1 {
+  version: 1;
+  goal: string;
+  plannedActions: string[];
+  writablePaths: string[];
+  protectedPaths: string[];
+  riskLevel: "low" | "medium" | "high";
+  rationale: string | null;
+  proposalSource: "ai" | "fallback";
+  proposalNotice: string | null;
+  approvedAt: string | null;
+  updatedAt: string;
+}
+
+export type ExecutionContract = ExecutionContractV0 | ExecutionContractV1;
 
 export interface AgentRun {
   id: string;

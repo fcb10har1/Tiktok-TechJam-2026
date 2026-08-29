@@ -588,15 +588,105 @@ export default function App() {
                     <article className="execution-contract">
                       <div className="contract-header">
                         <div>
-                          <span className="eyebrow">Execution Contract v0</span>
+                          <span className="eyebrow">
+                            Execution Contract v{activeRun.executionContract.version}
+                          </span>
                           <h3>Awaiting approval</h3>
                         </div>
-                        <span className="contract-status">Awaiting approval</span>
+                        <div className="contract-badges">
+                          {activeRun.executionContract.version === 1 && (
+                            <span
+                              className={
+                                "proposal-source proposal-source-" +
+                                activeRun.executionContract.proposalSource
+                              }
+                            >
+                              <span className="proposal-source-dot" aria-hidden="true" />
+                              {activeRun.executionContract.proposalSource === "ai"
+                                ? "AI proposal"
+                                : "Fallback contract"}
+                            </span>
+                          )}
+                          <span className="contract-status">
+                            <span className="contract-status-dot" aria-hidden="true" />
+                            Awaiting approval
+                          </span>
+                        </div>
                       </div>
-                      <div className="contract-task">
-                        <strong>Task</strong>
-                        <p>{activeRun.prompt}</p>
-                      </div>
+                      {activeRun.executionContract.version === 1 ? (
+                        <>
+                          {activeRun.executionContract.proposalNotice && (
+                            <p className="contract-notice">
+                              {activeRun.executionContract.proposalNotice}
+                            </p>
+                          )}
+                          <div className="contract-task">
+                            <strong>Goal</strong>
+                            <p>{activeRun.executionContract.goal}</p>
+                          </div>
+                          <div className="contract-section">
+                            <strong>Planned actions</strong>
+                            {activeRun.executionContract.plannedActions.length > 0 ? (
+                              <ol>
+                                {activeRun.executionContract.plannedActions.map(
+                                  (action, index) => (
+                                    <li key={index + "-" + action}>{action}</li>
+                                  ),
+                                )}
+                              </ol>
+                            ) : (
+                              <p className="contract-empty">No actions proposed.</p>
+                            )}
+                          </div>
+                          <div className="contract-section">
+                            <strong>Proposed writable scope</strong>
+                            {activeRun.executionContract.writablePaths.length > 0 ? (
+                              <ul className="contract-scope-list">
+                                {activeRun.executionContract.writablePaths.map(
+                                  (writablePath) => (
+                                    <li key={writablePath}>
+                                      <code>{writablePath}</code>
+                                    </li>
+                                  ),
+                                )}
+                              </ul>
+                            ) : (
+                              <p className="contract-empty">
+                                No writable paths were proposed.
+                              </p>
+                            )}
+                            <p className="contract-advisory">
+                              <strong>V1A advisory:</strong> this writable scope is not
+                              runtime-enforced. Protected paths are the only filesystem
+                              restrictions currently enforced.
+                            </p>
+                          </div>
+                          <div className="contract-summary">
+                            <div className="contract-risk">
+                              <strong className="contract-field-label">Risk level</strong>
+                              <span
+                                className={
+                                  "risk-level risk-level-" +
+                                  activeRun.executionContract.riskLevel
+                                }
+                              >
+                                {activeRun.executionContract.riskLevel}
+                              </span>
+                            </div>
+                            {activeRun.executionContract.rationale && (
+                              <div>
+                                <strong>Rationale</strong>
+                                <p>{activeRun.executionContract.rationale}</p>
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="contract-task">
+                          <strong>Task</strong>
+                          <p>{activeRun.prompt}</p>
+                        </div>
+                      )}
                       <div className="contract-paths">
                         <strong>Protected paths</strong>
                         {activeRun.executionContract.protectedPaths.length === 0 ? (
@@ -641,8 +731,8 @@ export default function App() {
                         </form>
                       </div>
                       <p className="contract-limitation">
-                        v0 mounts only paths that exist when the container starts. A listed path
-                        that does not exist can still be created during this Run.
+                        Protected mounts cover only paths that exist when the container starts.
+                        A listed path that does not exist can still be created during this Run.
                       </p>
                       <div className="contract-actions">
                         <button

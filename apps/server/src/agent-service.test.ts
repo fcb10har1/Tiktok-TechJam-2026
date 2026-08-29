@@ -4,6 +4,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
+import type {
+  ContractPlanner,
+  ContractPlanningInput,
+  ContractProposal,
+} from "./contract-planner.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
@@ -27,6 +32,27 @@ class FakeRunner implements AgentRunner {
   }
 }
 
+const basicProposal: ContractProposal = {
+  goal: "Complete the requested task",
+  plannedActions: ["Inspect the relevant files", "Make the requested change", "Run tests"],
+  writablePaths: ["src"],
+  protectedPaths: [],
+  riskLevel: "low",
+  rationale: "The proposed change is limited to source files.",
+};
+
+class FakePlanner implements ContractPlanner {
+  readonly calls: ContractPlanningInput[] = [];
+
+  constructor(private readonly result: ContractProposal | Error = basicProposal) {}
+
+  async propose(input: ContractPlanningInput): Promise<ContractProposal> {
+    this.calls.push(structuredClone(input));
+    if (this.result instanceof Error) throw this.result;
+    return structuredClone(this.result);
+  }
+}
+
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -41,6 +67,7 @@ afterEach(async () => {
 async function makeService(
   runner: AgentRunner = new FakeRunner(),
   environment: NodeJS.ProcessEnv = {},
+  planner: ContractPlanner = new FakePlanner(),
 ): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
@@ -59,6 +86,7 @@ async function makeService(
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
+    planner,
   );
   await service.initialize();
   return service;
@@ -84,6 +112,13 @@ describe("Agent lifecycle", () => {
     const { run } = await service.sendMessage(agent.id, "write hello world");
 
     expect(run.status).toBe("awaiting_approval");
+    expect(run.executionContract).toMatchObject({
+      version: 1,
+      proposalSource: "ai",
+      goal: "Complete the requested task",
+      writablePaths: ["src"],
+      riskLevel: "low",
+    });
     expect(run.executionContract?.protectedPaths).toEqual([".env", "deployment"]);
     expect(runner.calls).toHaveLength(0);
 
@@ -95,6 +130,160 @@ describe("Agent lifecycle", () => {
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
   });
 
+  it("triggers preflight planning and persists a validated AI proposal", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner({
+      goal: "Add a focused utility",
+      plannedActions: ["Inspect src", "Add the utility", "Test it"],
+      writablePaths: ["src/utility.ts", "src/utility.test.ts"],
+      protectedPaths: ["secrets"],
+      riskLevel: "medium",
+      rationale: "Two source files are expected to change.",
+    });
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({
+      name: "Planner",
+      instructions: "Prefer small TypeScript changes.",
+    });
+
+    const { run } = await service.sendMessage(agent.id, "Add a utility");
+
+    expect(planner.calls).toHaveLength(1);
+    expect(planner.calls[0]).toMatchObject({
+      task: "Add a utility",
+      agentInstructions: "Prefer small TypeScript changes.",
+    });
+    expect(planner.calls[0]?.workspaceInventory).toEqual(
+      expect.arrayContaining(["AGENTS.md", "README.md"]),
+    );
+    expect(run).toMatchObject({
+      status: "awaiting_approval",
+      executionContract: {
+        version: 1,
+        goal: "Add a focused utility",
+        plannedActions: ["Inspect src", "Add the utility", "Test it"],
+        writablePaths: ["src/utility.ts", "src/utility.test.ts"],
+        protectedPaths: [".env", "deployment", "secrets"],
+        riskLevel: "medium",
+        rationale: "Two source files are expected to change.",
+        proposalSource: "ai",
+        proposalNotice: null,
+        approvedAt: null,
+      },
+    });
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it("persists a fallback V1 contract and never runs when planning fails", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner(new Error("provider returned 429"));
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Fallback" });
+
+    const { run } = await service.sendMessage(agent.id, "Review manually");
+
+    expect(planner.calls).toHaveLength(1);
+    expect(run).toMatchObject({
+      status: "awaiting_approval",
+      executionContract: {
+        version: 1,
+        goal: "Review manually",
+        writablePaths: [],
+        protectedPaths: [".env", "deployment"],
+        riskLevel: "medium",
+        proposalSource: "fallback",
+        proposalNotice: "AI proposal unavailable — review contract manually.",
+        approvedAt: null,
+      },
+    });
+    expect(service.getRun(run.id)).toEqual(run);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
+  it("falls back safely when planning returns invalid paths", async () => {
+    for (const planner of [
+      new FakePlanner({
+        ...basicProposal,
+        writablePaths: ["../outside"],
+      }),
+      new FakePlanner({
+        ...basicProposal,
+        protectedPaths: Array.from({ length: 100 }, (_, index) => "safe-" + index),
+      }),
+    ]) {
+      const runner = new FakeRunner();
+      const service = await makeService(runner, {}, planner);
+      const agent = await service.createAgent({ name: "Fallback" });
+
+      const { run } = await service.sendMessage(agent.id, "Review manually");
+
+      expect(run).toMatchObject({
+        status: "awaiting_approval",
+        executionContract: {
+          version: 1,
+          goal: "Review manually",
+          writablePaths: [],
+          protectedPaths: [".env", "deployment"],
+          riskLevel: "medium",
+          proposalSource: "fallback",
+          proposalNotice: "AI proposal unavailable — review contract manually.",
+          approvedAt: null,
+        },
+      });
+      expect(runner.calls).toHaveLength(0);
+      await service.cancelRun(run.id);
+    }
+  });
+
+  it("lets a human protect an AI-proposed writable path before approval", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner({
+      goal: "Improve authentication",
+      plannedActions: ["Update authentication logic", "Run authentication tests"],
+      writablePaths: ["src/auth.ts"],
+      protectedPaths: [],
+      riskLevel: "medium",
+      rationale: "The implementation change is limited to authentication source.",
+    });
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Human override" });
+
+    const { run } = await service.sendMessage(agent.id, "Improve authentication");
+    expect(run.executionContract).toMatchObject({
+      version: 1,
+      proposalSource: "ai",
+      writablePaths: ["src/auth.ts"],
+      protectedPaths: [".env", "deployment"],
+    });
+    expect(runner.calls).toHaveLength(0);
+
+    const amended = await service.updateExecutionContract(run.id, [
+      ...(run.executionContract?.protectedPaths ?? []),
+      "src/auth.ts",
+    ]);
+    expect(amended.executionContract).toMatchObject({
+      writablePaths: ["src/auth.ts"],
+      protectedPaths: [".env", "deployment", "src/auth.ts"],
+      approvedAt: null,
+    });
+    expect(runner.calls).toHaveLength(0);
+
+    await service.approveRun(run.id);
+    await expect.poll(() => runner.calls.length).toBe(1);
+    expect(runner.calls[0]?.protectedPaths).toEqual([
+      ".env",
+      "deployment",
+      "src/auth.ts",
+    ]);
+    expect(service.getRun(run.id).executionContract).toMatchObject({
+      protectedPaths: [".env", "deployment", "src/auth.ts"],
+      approvedAt: expect.any(String),
+    });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
   it("amends, freezes, and passes the approved contract exactly once", async () => {
     const runner = new FakeRunner();
     const service = await makeService(runner);
@@ -102,13 +291,11 @@ describe("Agent lifecycle", () => {
     const { run } = await service.sendMessage(agent.id, "change source only");
 
     const amended = await service.updateExecutionContract(run.id, [
-      ".env",
-      "deployment",
+      "package.json",
       "infra/secrets",
     ]);
     expect(amended.executionContract?.protectedPaths).toEqual([
-      ".env",
-      "deployment",
+      "package.json",
       "infra/secrets",
     ]);
     expect(runner.calls).toHaveLength(0);
@@ -121,8 +308,7 @@ describe("Agent lifecycle", () => {
     expect(approvals.filter((result) => result.status === "rejected")).toHaveLength(1);
     await expect.poll(() => runner.calls.length).toBe(1);
     expect(runner.calls[0]?.protectedPaths).toEqual([
-      ".env",
-      "deployment",
+      "package.json",
       "infra/secrets",
     ]);
 
@@ -167,7 +353,6 @@ describe("Agent lifecycle", () => {
     [["../secret"], "workspace-relative"],
     [["deployment\\secret"], "workspace-relative"],
     [["deployment,src"], "workspace-relative"],
-    [["deployment", "deployment"], "Duplicate"],
   ])("rejects invalid protected paths %#", async (protectedPaths, message) => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Invalid" });

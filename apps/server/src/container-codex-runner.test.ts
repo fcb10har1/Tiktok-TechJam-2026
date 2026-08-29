@@ -94,7 +94,12 @@ describe("Container Codex runner", () => {
         workspacePath,
         prompt: "test",
         threadId: null,
-        protectedPaths: [".env", "deployment"],
+        protectedPaths: [
+          ".env",
+          "deployment/",
+          "deployment",
+          "deployment/config.yml",
+        ],
       }),
     ).toEqual([
       "--mount",

@@ -44,6 +44,7 @@ const envSchema = z.object({
     .string()
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
+  PLANNER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
 });
 
@@ -87,6 +88,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     arkApiKey: env.ARK_API_KEY?.trim() ?? "",
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
+    plannerTimeoutMs: env.PLANNER_TIMEOUT_MS,
     nodeEnv: env.NODE_ENV,
   };
 }

@@ -36,12 +36,30 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
-export interface ExecutionContract {
+export interface ExecutionContractV0 {
   version: 0;
   protectedPaths: string[];
   approvedAt: string | null;
   updatedAt: string;
 }
+
+export type ContractRiskLevel = "low" | "medium" | "high";
+
+export interface ExecutionContractV1 {
+  version: 1;
+  goal: string;
+  plannedActions: string[];
+  writablePaths: string[];
+  protectedPaths: string[];
+  riskLevel: ContractRiskLevel;
+  rationale: string | null;
+  proposalSource: "ai" | "fallback";
+  proposalNotice: string | null;
+  approvedAt: string | null;
+  updatedAt: string;
+}
+
+export type ExecutionContract = ExecutionContractV0 | ExecutionContractV1;
 
 export interface AgentRun {
   id: string;
