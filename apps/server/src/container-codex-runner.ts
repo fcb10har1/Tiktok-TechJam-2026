@@ -1,4 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
@@ -11,6 +13,8 @@ import type {
 } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+
+export const POC_PROTECTED_PATHS = [".env", "deployment"] as const;
 
 interface ActiveContainer {
   child: ChildProcess;
@@ -33,6 +37,60 @@ export function containerName(agentId: string, instanceId = "default"): string {
   const safeInstance = instanceId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 32);
   const safeAgent = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   return "launchpad-" + safeInstance + "-" + safeAgent;
+}
+
+function isInsideWorkspace(workspacePath: string, candidatePath: string): boolean {
+  const relative = path.relative(workspacePath, candidatePath);
+  return relative === "" || (!relative.startsWith(".." + path.sep) && relative !== "..");
+}
+
+export function buildWorkspaceMountArgs(request: RunnerRequest): string[] {
+  const workspacePath = path.resolve(request.workspacePath);
+  const mounts = [
+    "--mount",
+    "type=bind,src=" + request.workspacePath + ",dst=/workspace",
+  ];
+
+  for (const declaredPath of request.protectedPaths ?? POC_PROTECTED_PATHS) {
+    if (
+      !declaredPath ||
+      path.posix.isAbsolute(declaredPath) ||
+      declaredPath.includes("\\") ||
+      declaredPath.includes(",")
+    ) {
+      throw new Error("Protected path must be a workspace-relative POSIX path: " + declaredPath);
+    }
+    const normalizedPath = path.posix.normalize(declaredPath);
+    if (
+      normalizedPath === "." ||
+      normalizedPath === ".." ||
+      normalizedPath.startsWith("../")
+    ) {
+      throw new Error("Protected path escapes the workspace: " + declaredPath);
+    }
+
+    const candidatePath = path.resolve(workspacePath, normalizedPath);
+    if (!isInsideWorkspace(workspacePath, candidatePath)) {
+      throw new Error("Protected path escapes the workspace: " + declaredPath);
+    }
+    if (!existsSync(candidatePath)) continue;
+
+    const canonicalWorkspacePath = realpathSync(workspacePath);
+    const sourcePath = realpathSync(candidatePath);
+    if (!isInsideWorkspace(canonicalWorkspacePath, sourcePath)) {
+      throw new Error("Protected path resolves outside the workspace: " + declaredPath);
+    }
+    mounts.push(
+      "--mount",
+      "type=bind,src=" +
+        sourcePath +
+        ",dst=" +
+        path.posix.join("/workspace", normalizedPath) +
+        ",readonly",
+    );
+  }
+
+  return mounts;
 }
 
 export function buildContainerRunArgs(
@@ -76,8 +134,7 @@ export function buildContainerRunArgs(
     "HOME=/tmp",
     "--env",
     "NO_COLOR=1",
-    "--mount",
-    "type=bind,src=" + request.workspacePath + ",dst=/workspace",
+    ...buildWorkspaceMountArgs(request),
     "--mount",
     "type=bind,src=" + config.codexHome + ",dst=/codex-home",
     "--workdir",
