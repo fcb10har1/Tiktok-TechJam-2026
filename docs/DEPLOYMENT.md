@@ -7,6 +7,14 @@ Use one of two Volcengine ECS paths:
 
 Both profiles require a Volcengine Ark API key and a Responses-capable endpoint.
 
+> [!IMPORTANT]
+> These Compose/ECS profiles are deployment scaffolding for the control plane.
+> They run Codex through `local-process`, where V1 Execution Contract approval
+> is intentionally unavailable because compiled workspace authority cannot be
+> enforced. They therefore cannot execute the demonstrated V1 contract flow.
+> Use `npm run poc` with a local container engine for the supported end-to-end
+> V1 demo.
+
 ## Existing Linux ECS
 
 Recommended host:

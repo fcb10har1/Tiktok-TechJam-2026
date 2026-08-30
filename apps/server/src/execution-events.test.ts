@@ -191,6 +191,31 @@ describe("deterministic execution evidence", () => {
     expect(collector.events().map((item) => item.sequence)).toEqual([1, 2]);
   });
 
+  it("classifies a standalone npm test command from its actual exit status", async () => {
+    const collector = new ExecutionEventCollector(await workspaceRequest());
+    collector.consume(commandEvent("test", "/bin/bash -lc 'npm test'", "ok", 0));
+    expect(collector.events()).toMatchObject([
+      { kind: "verify", outcome: "success" },
+    ]);
+    expect(verificationSummary(collector.events())).toBe("Passed");
+  });
+
+  it.each([
+    "npm test || true",
+    "npm test; true",
+    "npm test | tee test-output.txt",
+  ])(
+    "does not treat a composed shell expression as passing verification: %s",
+    async (command) => {
+      const collector = new ExecutionEventCollector(await workspaceRequest());
+      collector.consume(
+        commandEvent("composed", "/bin/bash -lc '" + command + "'", "ok", 0),
+      );
+      expect(collector.events()).toMatchObject([{ kind: "command" }]);
+      expect(verificationSummary(collector.events())).toBe("Not observed");
+    },
+  );
+
   it("prefers workspace-diff mutations and deduplicates JSONL mutation claims", () => {
     const runtimeEvents = [
       {

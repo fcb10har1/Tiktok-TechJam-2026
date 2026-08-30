@@ -10,7 +10,7 @@ flowchart LR
     Service --> Workspace["Agent workspace"]
     Service --> Runner{"AgentRunner"}
     Runner -->|Local POC| Container["Disposable Runtime container"]
-    Runner -->|ECS| Process["Codex child process"]
+    Runner -->|Compose/ECS scaffolding| Process["Codex child process (no V1 approval)"]
     Container --> Ark["Volcengine Ark"]
     Process --> Ark
 ```
@@ -47,15 +47,21 @@ Interrupted Runs become `cancelled` after a restart.
 data/launchpad.json       Agent, message, and Run metadata
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
-codex-home/               Codex configuration and sessions
+codex-home/               Shared Codex configuration and sessions
 ```
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
 one process only.
 
+`codex-home/` is shared by all Agents. There is no per-Agent confidentiality or
+integrity boundary for its configuration or session data; Execution Contract
+workspace authority governs only the selected Agent's workspace mount.
+
 ### Runtime providers
 
-- `CodexRunner` runs Codex inside the application container for ECS.
+- `CodexRunner` runs Codex inside the application container for Compose/ECS
+  scaffolding. V1 contract approval is disabled for this provider because it
+  cannot enforce compiled workspace authority.
 - `ContainerCodexRunner` starts one disposable Docker, Colima, or Podman
   container for every local turn.
 
@@ -67,8 +73,8 @@ the stored Codex thread, and escalate termination after a grace period.
 | Profile | Control plane | Agent execution |
 | --- | --- | --- |
 | Local POC | Host Node.js | Disposable local container |
-| ECS | Application container | Codex process in the same container |
-| Local development | Host Node.js | Host Codex process |
+| Compose/ECS scaffolding | Application container | Local-process Codex; no V1 contract approval/execution |
+| Local development | Host Node.js | Local-process Codex; no V1 contract approval/execution |
 
 ## Extension seams
 

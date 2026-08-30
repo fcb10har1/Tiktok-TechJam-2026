@@ -132,6 +132,13 @@ For a clean Linux host, follow the
 
 ## Docker Compose
 
+> [!IMPORTANT]
+> The current Compose/ECS profile is deployment scaffolding for the control
+> plane and uses the `local-process` runner. That runner cannot approve or
+> execute V1 authority contracts, so it does not provide the demonstrated V1
+> filesystem-enforcement flow. Use `npm run poc` with Docker, Colima, or Podman
+> for the supported end-to-end demo.
+
 Create and edit the configuration:
 
 ```bash
@@ -180,6 +187,11 @@ CODEX_HOME=codex-home
 
 ## Deployment
 
+The Compose and ECS paths below are control-plane deployment scaffolding, not
+feature-parity V1 execution profiles. They use `local-process`, where approval
+is intentionally unavailable because V1 workspace authority cannot be
+enforced. The supported V1 demo is the local container POC.
+
 - [Existing Linux ECS with Docker](docs/DEPLOYMENT.md#existing-linux-ecs)
 - [Complete Volcengine environment with Terraform](docs/DEPLOYMENT.md#terraform-deployment)
 - [Local Docker, Colima, and Podman details](docs/LOCAL_POC.md)
@@ -224,7 +236,7 @@ flowchart LR
     API --> Store["JSON metadata and Agent workspaces"]
     API --> Runtime{"Runtime provider"}
     Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
-    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
+    Runtime -->|Compose/ECS scaffolding| Codex["Codex CLI in application container (no V1 approval)"]
     Container --> Ark["Volcengine Ark Responses API"]
     Codex --> Ark
 ```
@@ -355,10 +367,12 @@ container escape.
 ### Execution evidence and test wording
 
 Workspace mutation evidence is derived independently from bounded SHA-256
-manifests captured immediately before and after execution. It reports the net
-resulting persistent workspace state. With incomplete enumeration or an
-unhashable path, Ultr0n reports partial or unavailable evidence and prefers
-`Not observed` over inferring a mutation.
+manifests of regular files captured immediately before and after execution. It
+reports net resulting regular-file content changes in the persistent workspace.
+It does not observe symlinks, empty-directory changes, metadata-only changes,
+or every filesystem mutation. With incomplete enumeration or an unhashable
+path, Ultr0n reports partial or unavailable evidence and prefers `Not observed`
+over inferring a mutation.
 
 ```text
 file changed during execution
@@ -398,6 +412,15 @@ to reverse:
 - network side effects;
 - calls to external services; or
 - arbitrary runtime or environment state outside the workspace.
+
+Snapshot creation is a mandatory pre-execution prerequisite, not a best-effort
+extra. The default snapshot limits are 20,000 filesystem entries, 10,000
+regular files, 64 path components, 10 MiB per regular file, and 100 MiB total
+regular-file content. If complete snapshot capture and matching PRE-state
+validation cannot finish within those bounds, the Run fails before Codex
+starts. Workspaces containing large dependency, build-output, or cache trees
+can therefore be rejected until those trees are removed or kept outside the
+Agent workspace.
 
 After a newer Run executes against the same Agent workspace, an older Run's
 snapshot is superseded and can no longer be rolled back. A missing, incomplete,

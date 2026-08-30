@@ -138,6 +138,19 @@ describe("bounded workspace manifests", () => {
     expect(JSON.stringify([...captured.entries.values()])).not.toContain("outside");
   });
 
+  it("does not report symlink-only changes as regular-file content mutations", async () => {
+    const root = await workspace();
+    const outside = await workspace();
+    await writeFile(path.join(outside, "outside.txt"), "outside\n");
+    const before = await captureWorkspaceManifest(root);
+    await symlink(path.join(outside, "outside.txt"), path.join(root, "file-link"));
+    const after = await captureWorkspaceManifest(root);
+    expect(compareWorkspaceManifests(before, after)).toMatchObject({
+      mutations: [],
+      status: "complete",
+    });
+  });
+
   it("cannot traverse a workspace symlink into an external tree", async () => {
     const root = await workspace();
     const outside = await workspace();

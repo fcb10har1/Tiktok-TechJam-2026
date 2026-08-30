@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   displayableTechnicalCommandEvents,
   hasTestFileIntegrityWarning,
+  resultingRegularFileChangesLabel,
   testCommandStatus,
 } from "../../web/src/observability.js";
 import type { RunEvent } from "../../web/src/types.js";
@@ -108,5 +109,22 @@ describe("execution evidence display", () => {
     expect(
       displayableTechnicalCommandEvents([emptyCommand, exitOnlyCommand]),
     ).toEqual([exitOnlyCommand]);
+  });
+
+  it("labels workspace evidence as resulting regular-file content changes", () => {
+    expect(resultingRegularFileChangesLabel([], "complete")).toBe(
+      "No resulting regular-file content changes",
+    );
+    expect(resultingRegularFileChangesLabel([], "partial")).toBe("Not observed");
+    expect(
+      resultingRegularFileChangesLabel(
+        [mutation("src/auth.ts"), runEvent("create", {
+          path: "src/new.ts",
+          outcome: "success",
+          source: "workspace-diff",
+        })],
+        "complete",
+      ),
+    ).toBe("1 created · 1 modified");
   });
 });

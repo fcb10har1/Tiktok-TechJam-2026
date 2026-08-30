@@ -181,6 +181,11 @@ describe("ArkContractPlanner", () => {
     });
     expect(body.text.format.schema.required).toContain("removedProtectedPaths");
     expect(body.instructions).toContain("Preserve every existing protected path");
+    expect(body.instructions).toContain(
+      "every other workspace path read-only by default",
+    );
+    expect(body.instructions).toContain("protected paths always win");
+    expect(body.instructions).not.toContain("Writable paths are advisory only");
     const input = JSON.stringify(body.input);
     expect(input).toContain("Improve authentication");
     expect(input).toContain("Only touch src/auth.");

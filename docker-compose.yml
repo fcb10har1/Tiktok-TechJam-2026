@@ -1,3 +1,6 @@
+# Control-plane deployment scaffolding only. This local-process profile cannot
+# approve or execute V1 workspace-authority contracts; use npm run poc for the
+# supported end-to-end V1 container flow.
 services:
   launchpad:
     build:

@@ -1,4 +1,4 @@
-import type { RunEvent } from "./types";
+import type { AgentRun, RunEvent } from "./types";
 
 export type TestCommandStatus =
   | "Test command passed"
@@ -57,4 +57,28 @@ export function displayableTechnicalCommandEvents(
       (Boolean(event.technical.command) ||
         event.technical.exitCode !== undefined),
   );
+}
+
+export function resultingRegularFileChangesLabel(
+  events: readonly RunEvent[],
+  status: AgentRun["workspaceDiffStatus"],
+): string {
+  const changes = events.filter(
+    (event) =>
+      event.technical.source === "workspace-diff" &&
+      WORKSPACE_MUTATION_KINDS.has(event.kind),
+  );
+  const labels = [
+    ["create", "created"],
+    ["modify", "modified"],
+    ["delete", "deleted"],
+  ] as const;
+  const parts = labels.flatMap(([kind, label]) => {
+    const count = changes.filter((event) => event.kind === kind).length;
+    return count > 0 ? [count + " " + label] : [];
+  });
+  if (parts.length > 0) return parts.join(" · ");
+  return status === "complete"
+    ? "No resulting regular-file content changes"
+    : "Not observed";
 }
