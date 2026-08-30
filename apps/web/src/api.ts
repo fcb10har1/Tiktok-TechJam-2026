@@ -1,4 +1,10 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  Agent,
+  AgentRun,
+  ContractPlanningFailureCode,
+  Message,
+  SystemInfo,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -78,4 +84,41 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  updateExecutionContract: (
+    id: string,
+    body: { protectedPaths?: string[]; writablePaths?: string[] },
+  ) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/contract", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  retryExecutionContractProposal: (id: string) =>
+    request<{
+      run: AgentRun;
+      applied: boolean;
+      notice: string | null;
+      failureCode: ContractPlanningFailureCode | null;
+    }>("/api/runs/" + id + "/contract/retry-proposal", {
+      method: "POST",
+    }),
+  negotiateExecutionContract: (id: string, instruction: string) =>
+    request<{ run: AgentRun; applied: boolean; notice: string | null }>(
+      "/api/runs/" + id + "/contract/negotiate",
+      {
+        method: "POST",
+        body: JSON.stringify({ instruction }),
+      },
+    ),
+  approveRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/approve", {
+      method: "POST",
+    }),
+  cancelRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/cancel", {
+      method: "POST",
+    }),
+  rollbackRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/rollback", {
+      method: "POST",
+    }),
 };

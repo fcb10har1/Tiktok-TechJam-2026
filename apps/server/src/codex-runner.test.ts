@@ -9,6 +9,13 @@ describe("Codex runner protocol", () => {
         workspacePath: "/tmp/workspace",
         prompt: "build a calculator",
         threadId: null,
+        writablePaths: [],
+        protectedPaths: [],
+        authorityPlan: {
+          workspaceSourcePath: "/tmp/workspace",
+          writableMounts: [],
+          protectedMounts: [],
+        },
       },
       "workspace-write",
     );
@@ -31,6 +38,13 @@ describe("Codex runner protocol", () => {
         workspacePath: "/tmp/workspace",
         prompt: "add tests",
         threadId: "thread-123",
+        writablePaths: [],
+        protectedPaths: [],
+        authorityPlan: {
+          workspaceSourcePath: "/tmp/workspace",
+          writableMounts: [],
+          protectedMounts: [],
+        },
       },
       "workspace-write",
     );
