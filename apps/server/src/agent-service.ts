@@ -9,6 +9,7 @@ import {
   type ContractPlanningFailureCode,
   type ContractPlanner,
   type ContractProposal,
+  type ContractSchemaIssue,
 } from "./contract-planner.js";
 import { HttpError, RunCancelledError, RunExecutionError } from "./errors.js";
 import { mergeExecutionEvidence } from "./execution-events.js";
@@ -69,6 +70,7 @@ export interface PlannerDiagnostic {
   model: string;
   durationMs: number | null;
   retryCount: number;
+  schemaIssues?: readonly ContractSchemaIssue[];
 }
 
 type PlannerDiagnosticLogger = (diagnostic: PlannerDiagnostic) => void;
@@ -764,6 +766,7 @@ export class AgentService {
         model: this.config.arkPlannerModel,
         durationMs: error.durationMs,
         retryCount: error.retryCount,
+        ...(error.schemaIssues ? { schemaIssues: error.schemaIssues } : {}),
       });
     } catch {
       // Diagnostics must never alter the contract lifecycle.

@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "./config.js";
 import {
   ArkContractPlanner,
+  ContractPlanningError,
+  parseContractProposal,
   type ContractAmendment,
   type ContractProposal,
 } from "./contract-planner.js";
@@ -81,6 +83,37 @@ afterEach(() => {
 });
 
 describe("ArkContractPlanner", () => {
+  it("reports only sanitized Zod issue metadata for schema-invalid proposals", () => {
+    let caught: unknown;
+    try {
+      parseContractProposal({
+        ...validProposal,
+        riskLevel: "secret body text",
+        writablePaths: [42],
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ContractPlanningError);
+    expect(caught).toMatchObject({
+      code: "schema_invalid",
+      schemaIssues: [
+        {
+          path: "writablePaths.0",
+          code: "invalid_type",
+          expected: "string",
+        },
+        {
+          path: "riskLevel",
+          code: "invalid_value",
+          expected: "low|medium|high",
+        },
+      ],
+    });
+    expect(JSON.stringify(caught)).not.toContain("secret body text");
+  });
+
   it("defaults planner configuration to ARK_MODEL and a 30-second timeout", () => {
     expect(config()).toMatchObject({
       arkModel: "planner-model",

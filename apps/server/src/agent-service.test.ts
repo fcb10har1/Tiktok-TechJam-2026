@@ -504,6 +504,47 @@ describe("Agent lifecycle", () => {
     await service.cancelRun(run.id);
   });
 
+  it("includes sanitized schema issues in planner diagnostics", async () => {
+    const runner = new FakeRunner();
+    const diagnostics: PlannerDiagnostic[] = [];
+    const planner = new FakePlanner([
+      new ContractPlanningError(
+        "Planner returned an invalid contract schema",
+        "schema_invalid",
+        null,
+        [
+          {
+            path: "riskLevel",
+            code: "invalid_value",
+            expected: "low|medium|high",
+          },
+        ],
+      ),
+    ]);
+    const service = await makeService(runner, {}, planner, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    );
+    const agent = await service.createAgent({ name: "Schema diagnostic" });
+
+    const { run } = await service.sendMessage(agent.id, "Update source");
+
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        operation: "proposal",
+        code: "schema_invalid",
+        schemaIssues: [
+          {
+            path: "riskLevel",
+            code: "invalid_value",
+            expected: "low|medium|high",
+          },
+        ],
+      }),
+    ]);
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
   it("keeps a failed retry byte-for-byte unchanged and returns a safe notice", async () => {
     const runner = new FakeRunner();
     const planner = new FakePlanner([

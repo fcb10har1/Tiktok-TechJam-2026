@@ -64,6 +64,12 @@ export type ContractPlanningFailureCode =
   | "path_invalid"
   | "provider_error";
 
+export interface ContractSchemaIssue {
+  path: string;
+  code: string;
+  expected?: string;
+}
+
 export class ContractPlanningError extends Error {
   readonly status: number | null;
   retryCount = 0;
@@ -73,11 +79,54 @@ export class ContractPlanningError extends Error {
     message: string,
     readonly code: ContractPlanningFailureCode = "provider_error",
     status: number | null = null,
+    readonly schemaIssues?: readonly ContractSchemaIssue[],
   ) {
     super(message);
     this.name = "ContractPlanningError";
     this.status = status;
   }
+}
+
+const MAX_SCHEMA_ISSUES = 20;
+const MAX_SCHEMA_EXPECTED_LENGTH = 200;
+
+function schemaIssuePath(path: readonly PropertyKey[]): string {
+  return path
+    .slice(0, 20)
+    .map((segment) =>
+      typeof segment === "string" || typeof segment === "number"
+        ? String(segment)
+        : "<key>",
+    )
+    .join(".");
+}
+
+function schemaIssueExpected(issue: z.core.$ZodIssue): string | undefined {
+  let expected: string | undefined;
+  if (issue.code === "invalid_type") {
+    expected = issue.expected;
+  } else if (issue.code === "invalid_value") {
+    expected = issue.values
+      .filter(
+        (value): value is string | number | boolean | null =>
+          value === null || ["string", "number", "boolean"].includes(typeof value),
+      )
+      .map(String)
+      .join("|");
+  }
+  if (!expected) return undefined;
+  return expected.slice(0, MAX_SCHEMA_EXPECTED_LENGTH);
+}
+
+function sanitizedSchemaIssues(error: z.ZodError): ContractSchemaIssue[] {
+  return error.issues.slice(0, MAX_SCHEMA_ISSUES).map((issue) => {
+    const expected = schemaIssueExpected(issue);
+    return {
+      path: schemaIssuePath(issue.path),
+      code: issue.code,
+      ...(expected ? { expected } : {}),
+    };
+  });
 }
 
 const contractJsonSchema = {
@@ -304,6 +353,8 @@ export function parseContractProposal(value: unknown): ContractProposal {
     throw new ContractPlanningError(
       "Planner returned an invalid contract schema",
       "schema_invalid",
+      null,
+      sanitizedSchemaIssues(result.error),
     );
   }
   try {
@@ -326,6 +377,8 @@ export function parseContractAmendment(value: unknown): ContractAmendment {
     throw new ContractPlanningError(
       "Planner returned an invalid amendment schema",
       "schema_invalid",
+      null,
+      sanitizedSchemaIssues(result.error),
     );
   }
   try {
