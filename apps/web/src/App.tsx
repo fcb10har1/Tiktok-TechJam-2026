@@ -40,6 +40,88 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
+interface AuthorityPathSectionProps {
+  title: string;
+  tone: "writable" | "protected";
+  paths: readonly string[];
+  emptyText: string;
+  description: string;
+  addLabel: string;
+  placeholder: string;
+  inputValue: string;
+  disabled: boolean;
+  enforced?: boolean;
+  onInputChange: (value: string) => void;
+  onSubmit: (event: React.FormEvent) => void;
+  onRemove: (workspacePath: string) => void;
+}
+
+function AuthorityPathSection({
+  title,
+  tone,
+  paths,
+  emptyText,
+  description,
+  addLabel,
+  placeholder,
+  inputValue,
+  disabled,
+  enforced = false,
+  onInputChange,
+  onSubmit,
+  onRemove,
+}: AuthorityPathSectionProps) {
+  return (
+    <section className={"contract-authority contract-authority-" + tone}>
+      <div className="contract-section-heading">
+        <strong>{title}</strong>
+        {enforced && <span className="authority-badge">Enforced</span>}
+      </div>
+      {paths.length > 0 ? (
+        <ul className="authority-path-list">
+          {paths.map((workspacePath) => (
+            <li key={workspacePath}>
+              <code>{workspacePath}</code>
+              <button
+                type="button"
+                className="path-remove-button"
+                disabled={disabled}
+                onClick={() => onRemove(workspacePath)}
+                aria-label={"Remove " + tone + " path " + workspacePath}
+                title={"Remove " + workspacePath}
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="contract-empty">{emptyText}</p>
+      )}
+      <details className="contract-path-editor">
+        <summary>＋ {addLabel}</summary>
+        <form className="contract-add-path" onSubmit={onSubmit}>
+          <input
+            value={inputValue}
+            onChange={(event) => onInputChange(event.target.value)}
+            placeholder={placeholder}
+            disabled={disabled}
+            aria-label={placeholder}
+          />
+          <button
+            type="submit"
+            className="button button-ghost"
+            disabled={disabled || !inputValue.trim()}
+          >
+            Add
+          </button>
+        </form>
+      </details>
+      <p className="authority-description">{description}</p>
+    </section>
+  );
+}
+
 function eventDescription(event: RunEvent): string {
   if (event.kind === "inspect") return "Inspected " + event.path;
   if (event.kind === "create") return "Created " + event.path;
@@ -51,11 +133,7 @@ function eventDescription(event: RunEvent): string {
       : "Test command failed";
   }
   if (event.kind === "blocked") {
-    const reason =
-      event.authorityReason === "explicitly_protected"
-        ? "Explicitly protected"
-        : "Outside approved write authority";
-    return "Blocked write to " + event.path + " — " + reason;
+    return "Blocked " + event.path;
   }
   if (event.kind === "warning") {
     return event.path
@@ -63,6 +141,19 @@ function eventDescription(event: RunEvent): string {
       : "Permission failure observed; authority attribution was inconclusive";
   }
   return event.outcome === "failure" ? "Command failed" : "Ran a command";
+}
+
+function eventSupportingText(event: RunEvent): string | null {
+  if (event.kind !== "blocked") return null;
+  return event.authorityReason === "explicitly_protected"
+    ? "Explicitly protected"
+    : "Outside approved write authority";
+}
+
+function eventGlyph(event: RunEvent): string {
+  if (event.kind === "blocked") return "🚫";
+  if (event.kind === "warning") return "⚠";
+  return event.outcome === "failure" ? "×" : "✓";
 }
 
 function changedFilesLabel(events: readonly RunEvent[], status: AgentRun["workspaceDiffStatus"]): string {
@@ -564,14 +655,10 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">A</div>
+          <div className="brand-mark">U</div>
           <div>
-            <strong>Agent Launchpad</strong>
-            <span>
-              {system?.runtimeProvider === "container"
-                ? "Local container · Codex CLI"
-                : "ECS / Docker · Codex CLI"}
-            </span>
+            <strong>Ultr0n</strong>
+            <span>Zero-trust execution control</span>
           </div>
         </div>
 
@@ -741,8 +828,8 @@ export default function App() {
             <section className="playground">
               <div className="playground-topbar">
                 <div>
-                  <span className="eyebrow">Playground</span>
-                  <h2>Build something with your Agent</h2>
+                  <span className="eyebrow">Ultr0n control plane</span>
+                  <h2>Plan, approve, execute</h2>
                 </div>
                 <div className="session-info">
                   <span className="pulse" />
@@ -758,8 +845,8 @@ export default function App() {
                     </div>
                     <h3>What should {selected.name} build?</h3>
                     <p>
-                      The Agent can inspect files, write code, run commands, and continue the
-                      same Codex session across messages.
+                      Describe the task. Ultr0n proposes workspace authority for your
+                      review before Codex runs.
                     </p>
                     <div className="prompt-grid">
                       {starterPrompts.map((item) => (
@@ -784,12 +871,14 @@ export default function App() {
                 {activeRun?.status === "awaiting_approval" &&
                   activeRun.executionContract && (
                     <article className="execution-contract">
-                      <div className="contract-header">
-                        <div>
-                          <span className="eyebrow">
-                            Execution Contract v{activeRun.executionContract.version}
-                          </span>
-                          <h3>Awaiting approval</h3>
+                      <header className="contract-header">
+                        <div className="contract-heading">
+                          <span className="eyebrow">Preflight</span>
+                          <h3>
+                            {activeRun.executionContract.version === 1
+                              ? activeRun.executionContract.goal
+                              : activeRun.prompt}
+                          </h3>
                         </div>
                         <div className="contract-badges">
                           {activeRun.executionContract.version === 1 && (
@@ -802,7 +891,17 @@ export default function App() {
                               <span className="proposal-source-dot" aria-hidden="true" />
                               {activeRun.executionContract.proposalSource === "ai"
                                 ? "AI proposal"
-                                : "Fallback contract"}
+                                : "Manual fallback"}
+                            </span>
+                          )}
+                          {activeRun.executionContract.version === 1 && (
+                            <span
+                              className={
+                                "risk-level risk-level-" +
+                                activeRun.executionContract.riskLevel
+                              }
+                            >
+                              {activeRun.executionContract.riskLevel} risk
                             </span>
                           )}
                           <span className="contract-status">
@@ -810,42 +909,39 @@ export default function App() {
                             Awaiting approval
                           </span>
                         </div>
-                      </div>
+                      </header>
                       {activeRun.executionContract.version === 1 ? (
                         <>
-                          {activeRun.executionContract.proposalNotice && (
-                            <p className="contract-notice">
-                              {activeRun.executionContract.proposalNotice}
-                            </p>
-                          )}
                           {activeRun.executionContract.proposalSource === "fallback" && (
-                            <div className="contract-retry-proposal">
+                            <section className="contract-fallback">
+                              <div>
+                                <strong>AI proposal unavailable.</strong>
+                                <p>Configure authority manually or retry.</p>
+                              </div>
                               <button
                                 type="button"
                                 className="button button-ghost"
                                 disabled={busy || negotiatingContract || retryingProposal}
                                 onClick={() => void retryExecutionContractProposal()}
                               >
-                                {retryingProposal ? <Spinner /> : "Retry AI Proposal"}
+                                {retryingProposal ? <Spinner /> : "Retry AI proposal"}
                               </button>
                               {retryingProposal && (
-                                <span role="status">
+                                <span className="contract-planning-state" role="status">
                                   Planning only—Codex is not running.
                                 </span>
                               )}
-                            </div>
+                            </section>
                           )}
                           {proposalRetryNotice && (
                             <p className="contract-negotiation-notice" role="status">
                               {proposalRetryNotice}
                             </p>
                           )}
-                          <div className="contract-task">
-                            <strong>Goal</strong>
-                            <p>{activeRun.executionContract.goal}</p>
-                          </div>
-                          <div className="contract-section">
-                            <strong>Planned actions</strong>
+                          <section className="contract-plan">
+                            <div className="contract-section-heading">
+                              <strong>Plan</strong>
+                            </div>
                             {activeRun.executionContract.plannedActions.length > 0 ? (
                               <ol>
                                 {activeRun.executionContract.plannedActions.map(
@@ -857,96 +953,71 @@ export default function App() {
                             ) : (
                               <p className="contract-empty">No actions proposed.</p>
                             )}
-                          </div>
-                          <div className="contract-section">
-                            <strong>Runtime-enforced write authority</strong>
-                            {activeRun.executionContract.writablePaths.length > 0 ? (
-                              <ul className="contract-scope-list contract-editable-paths">
-                                {activeRun.executionContract.writablePaths.map(
-                                  (writablePath) => (
-                                    <li key={writablePath}>
-                                      <code>{writablePath}</code>
-                                      <button
-                                        type="button"
-                                        disabled={
-                                          busy || negotiatingContract || retryingProposal
-                                        }
-                                        onClick={() =>
-                                          void replaceWritablePaths(
-                                            activeRun.executionContract?.version === 1
-                                              ? activeRun.executionContract.writablePaths.filter(
-                                                  (item) => item !== writablePath,
-                                                )
-                                              : [],
-                                          )
-                                        }
-                                        aria-label={"Remove writable path " + writablePath}
-                                      >
-                                        Remove
-                                      </button>
-                                    </li>
-                                  ),
-                                )}
-                              </ul>
-                            ) : (
-                              <p className="contract-empty">
-                                No write authority is requested. The workspace will be
-                                completely read-only.
+                            {activeRun.executionContract.rationale && (
+                              <p className="contract-rationale">
+                                {activeRun.executionContract.rationale}
                               </p>
                             )}
-                            <form className="contract-add-path" onSubmit={addWritablePath}>
-                              <input
-                                value={writablePathInput}
-                                onChange={(event) =>
-                                  setWritablePathInput(event.target.value)
-                                }
-                                placeholder="Add writable path, e.g. src/**"
-                                disabled={busy || negotiatingContract || retryingProposal}
-                              />
-                              <button
-                                type="submit"
-                                className="button button-ghost"
-                                disabled={
-                                  busy ||
-                                  negotiatingContract ||
-                                  retryingProposal ||
-                                  !writablePathInput.trim()
-                                }
-                              >
-                                Add path
-                              </button>
-                            </form>
-                            <p className="contract-advisory">
-                              <strong>Enforced after approval:</strong> the Agent can
-                              modify or create files only inside these approved scopes.
-                              Everything else in the workspace is read-only.
-                            </p>
+                          </section>
+                          <div className="contract-authority-grid">
+                            <AuthorityPathSection
+                              title="Write authority"
+                              tone="writable"
+                              paths={activeRun.executionContract.writablePaths}
+                              emptyText="No write authority. The workspace remains read-only."
+                              description="Everything outside these scopes is read-only."
+                              addLabel="Add writable scope"
+                              placeholder="Workspace path, e.g. src/**"
+                              inputValue={writablePathInput}
+                              disabled={
+                                busy || negotiatingContract || retryingProposal
+                              }
+                              enforced
+                              onInputChange={setWritablePathInput}
+                              onSubmit={addWritablePath}
+                              onRemove={(writablePath) =>
+                                void replaceWritablePaths(
+                                  activeRun.executionContract?.version === 1
+                                    ? activeRun.executionContract.writablePaths.filter(
+                                        (item) => item !== writablePath,
+                                      )
+                                    : [],
+                                )
+                              }
+                            />
+                            <AuthorityPathSection
+                              title="Protected"
+                              tone="protected"
+                              paths={activeRun.executionContract.protectedPaths}
+                              emptyText="No explicit protected paths."
+                              description="Protected paths override writable scopes."
+                              addLabel="Protect path"
+                              placeholder="Workspace-relative path"
+                              inputValue={protectedPathInput}
+                              disabled={
+                                busy || negotiatingContract || retryingProposal
+                              }
+                              onInputChange={setProtectedPathInput}
+                              onSubmit={addProtectedPath}
+                              onRemove={(protectedPath) =>
+                                void replaceProtectedPaths(
+                                  activeRun.executionContract?.protectedPaths.filter(
+                                    (item) => item !== protectedPath,
+                                  ) ?? [],
+                                )
+                              }
+                            />
                           </div>
-                          <div className="contract-summary">
-                            <div className="contract-risk">
-                              <strong className="contract-field-label">Risk level</strong>
-                              <span
-                                className={
-                                  "risk-level risk-level-" +
-                                  activeRun.executionContract.riskLevel
-                                }
-                              >
-                                {activeRun.executionContract.riskLevel}
-                              </span>
-                            </div>
-                            {activeRun.executionContract.rationale && (
-                              <div>
-                                <strong>Rationale</strong>
-                                <p>{activeRun.executionContract.rationale}</p>
-                              </div>
-                            )}
-                          </div>
+                          <p className="contract-scope-note">
+                            Directory scopes end in <code>/**</code>; exact-file scopes
+                            do not authorize sibling files.
+                          </p>
                           <form
                             className="contract-negotiation"
                             onSubmit={negotiateExecutionContract}
                           >
                             <label htmlFor="contract-negotiation-input">
-                              Negotiate this contract
+                              Adjust this plan
                             </label>
                             <div className="contract-negotiation-row">
                               <textarea
@@ -955,7 +1026,7 @@ export default function App() {
                                 onChange={(event) =>
                                   setNegotiationInstruction(event.target.value)
                                 }
-                                placeholder="Tell Ultr0n what you want changed..."
+                                placeholder="Tell Ultr0n what you want changed…"
                                 rows={2}
                                 maxLength={5_000}
                                 disabled={busy || negotiatingContract || retryingProposal}
@@ -970,7 +1041,7 @@ export default function App() {
                                   !negotiationInstruction.trim()
                                 }
                               >
-                                Apply changes
+                                Update plan
                               </button>
                             </div>
                             {negotiatingContract && (
@@ -989,64 +1060,27 @@ export default function App() {
                           </form>
                         </>
                       ) : (
-                        <div className="contract-task">
-                          <strong>Task</strong>
-                          <p>{activeRun.prompt}</p>
-                        </div>
+                        <AuthorityPathSection
+                          title="Protected"
+                          tone="protected"
+                          paths={activeRun.executionContract.protectedPaths}
+                          emptyText="No explicit protected paths."
+                          description="Protected paths override writable scopes."
+                          addLabel="Protect path"
+                          placeholder="Workspace-relative path"
+                          inputValue={protectedPathInput}
+                          disabled={busy || negotiatingContract || retryingProposal}
+                          onInputChange={setProtectedPathInput}
+                          onSubmit={addProtectedPath}
+                          onRemove={(protectedPath) =>
+                            void replaceProtectedPaths(
+                              activeRun.executionContract?.protectedPaths.filter(
+                                (item) => item !== protectedPath,
+                              ) ?? [],
+                            )
+                          }
+                        />
                       )}
-                      <div className="contract-paths">
-                        <strong>Protected paths</strong>
-                        {activeRun.executionContract.protectedPaths.length === 0 ? (
-                          <p className="contract-empty">No paths are protected.</p>
-                        ) : (
-                          <ul>
-                            {activeRun.executionContract.protectedPaths.map((protectedPath) => (
-                              <li key={protectedPath}>
-                                <code>{protectedPath}</code>
-                                <button
-                                  type="button"
-                                  disabled={busy || negotiatingContract || retryingProposal}
-                                  onClick={() =>
-                                    void replaceProtectedPaths(
-                                      activeRun.executionContract?.protectedPaths.filter(
-                                        (item) => item !== protectedPath,
-                                      ) ?? [],
-                                    )
-                                  }
-                                  aria-label={"Remove protected path " + protectedPath}
-                                >
-                                  Remove
-                                </button>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        <form className="contract-add-path" onSubmit={addProtectedPath}>
-                          <input
-                            value={protectedPathInput}
-                            onChange={(event) => setProtectedPathInput(event.target.value)}
-                            placeholder="Add workspace-relative path"
-                            disabled={busy || negotiatingContract || retryingProposal}
-                          />
-                          <button
-                            type="submit"
-                            className="button button-ghost"
-                            disabled={
-                              busy ||
-                              negotiatingContract ||
-                              retryingProposal ||
-                              !protectedPathInput.trim()
-                            }
-                          >
-                            Add path
-                          </button>
-                        </form>
-                      </div>
-                      <p className="contract-limitation">
-                        Protected paths always override writable scopes. Directory scopes
-                        ending in <code>/**</code> authorize new descendants; exact-file
-                        scopes do not make sibling files writable.
-                      </p>
                       <div className="contract-actions">
                         <button
                           type="button"
@@ -1068,14 +1102,22 @@ export default function App() {
                     </article>
                   )}
                 {activeRun && ["queued", "running"].includes(activeRun.status) && (
-                  <article className="message message-assistant thinking">
-                    <div className="message-meta">
-                      <strong>{selected.name}</strong>
-                      <span>working in the Agent workspace</span>
-                    </div>
-                    <div className="thinking-row">
+                  <article className="runtime-progress">
+                    <span className="eyebrow">Execution</span>
+                    <div>
                       <Spinner />
-                      Codex is reading, editing, or running commands…
+                      <div>
+                        <strong>
+                          {activeRun.status === "queued"
+                            ? "Preparing approved Run"
+                            : "Codex is running"}
+                        </strong>
+                        <p>
+                          {activeRun.status === "queued"
+                            ? "The approved authority is being prepared."
+                            : "Reading, editing, or running commands in the approved workspace."}
+                        </p>
+                      </div>
                     </div>
                   </article>
                 )}
@@ -1085,12 +1127,15 @@ export default function App() {
                       <div className="execution-evidence-header">
                         <div>
                           <span className="eyebrow">Execution evidence</span>
-                          <h3>Deterministic post-run record</h3>
+                          <h3>What happened</h3>
                         </div>
-                        <span className="evidence-source">Runtime + workspace evidence</span>
+                        <span className="evidence-source">Observed record</span>
                       </div>
                       <section className="evidence-planned">
-                        <strong>Planned</strong>
+                        <div className="evidence-section-heading">
+                          <strong>Plan</strong>
+                          <span>Approved intent</span>
+                        </div>
                         {activeRun.executionContract?.version === 1 ? (
                           <ol>
                             {activeRun.executionContract.plannedActions.map(
@@ -1102,17 +1147,27 @@ export default function App() {
                         ) : (
                           <p>{activeRun.prompt}</p>
                         )}
-                        <small>Approved intent; this is not proof that an action occurred.</small>
+                        <small>This is not proof that an action occurred.</small>
                       </section>
                       <section className="evidence-executed">
-                        <strong>Executed evidence</strong>
+                        <div className="evidence-section-heading">
+                          <strong>Executed evidence</strong>
+                          <span>Runtime + workspace</span>
+                        </div>
                         {primaryExecutionEvents.length > 0 ? (
                           <ol className="evidence-timeline">
                             {primaryExecutionEvents.map((event) => (
                               <li key={event.id} className={"evidence-event evidence-" + event.kind}>
-                                <span className="evidence-marker" aria-hidden="true" />
+                                <span className="evidence-marker" aria-hidden="true">
+                                  {eventGlyph(event)}
+                                </span>
                                 <div>
                                   <p>{eventDescription(event)}</p>
+                                  {eventSupportingText(event) && (
+                                    <span className="evidence-supporting-text">
+                                      {eventSupportingText(event)}
+                                    </span>
+                                  )}
                                   <details>
                                     <summary>Technical details</summary>
                                     <dl>
@@ -1231,15 +1286,14 @@ export default function App() {
                             {activeRun.rollback.status === "available" ? (
                               <>
                                 <strong>Pre-run snapshot available</strong>
-                                <p>
-                                  Restore the workspace to its trusted state immediately
-                                  before this Run executed.
-                                </p>
+                                <p>Restore the persistent workspace to its pre-run state.</p>
                               </>
                             ) : activeRun.rollback.status === "restored" ? (
                               <>
-                                <strong className="recovery-success">✓ Rolled back</strong>
-                                <p>Workspace restored to its pre-run state.</p>
+                                <strong className="recovery-success">
+                                  ✓ Workspace rolled back
+                                </strong>
+                                <p>Restored to its pre-run state.</p>
                               </>
                             ) : activeRun.rollback.unavailableReason ===
                               "newer_run_executed" ? (
