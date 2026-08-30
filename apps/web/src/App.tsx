@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, setAuthToken } from "./api";
+import {
+  displayableTechnicalCommandEvents,
+  hasTestFileIntegrityWarning,
+  testCommandStatus,
+} from "./observability";
 import type { Agent, AgentRun, Message, RunEvent, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -35,21 +40,15 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
-function verificationStatus(events: readonly RunEvent[]): "Passed" | "Failed" | "Not observed" {
-  const verificationEvents = events.filter((event) => event.kind === "verify");
-  if (verificationEvents.length === 0) return "Not observed";
-  return verificationEvents.some((event) => event.outcome === "failure")
-    ? "Failed"
-    : "Passed";
-}
-
 function eventDescription(event: RunEvent): string {
   if (event.kind === "inspect") return "Inspected " + event.path;
   if (event.kind === "create") return "Created " + event.path;
   if (event.kind === "modify") return "Modified " + event.path;
   if (event.kind === "delete") return "Deleted " + event.path;
   if (event.kind === "verify") {
-    return event.outcome === "success" ? "Verification passed" : "Verification failed";
+    return event.outcome === "success"
+      ? "Test command passed"
+      : "Test command failed";
   }
   if (event.kind === "blocked") {
     const reason =
@@ -123,9 +122,10 @@ export default function App() {
   const primaryExecutionEvents = executionEvents.filter(
     (event) => event.kind !== "command" || event.outcome === "failure",
   );
-  const genericCommandEvents = executionEvents.filter(
-    (event) => event.kind === "command" && event.outcome !== "failure",
-  );
+  const genericCommandEvents = displayableTechnicalCommandEvents(executionEvents);
+  const currentTestCommandStatus = testCommandStatus(executionEvents);
+  const showTestFileIntegrityWarning =
+    hasTestFileIntegrityWarning(executionEvents);
   const workspaceMutationEvents = executionEvents.filter(
     (event) =>
       event.technical.source === "workspace-diff" &&
@@ -1141,9 +1141,9 @@ export default function App() {
                             <ol>
                               {genericCommandEvents.map((event) => (
                                 <li key={"technical-" + event.id}>
-                                  <code>
-                                    {event.technical.command ?? "Unclassified command"}
-                                  </code>
+                                  {event.technical.command && (
+                                    <code>{event.technical.command}</code>
+                                  )}
                                   {event.technical.exitCode !== undefined && (
                                     <span>Exit code {event.technical.exitCode}</span>
                                   )}
@@ -1202,8 +1202,18 @@ export default function App() {
                           )}
                         </div>
                         <div>
-                          <span>Verification</span>
-                          <strong>{verificationStatus(executionEvents)}</strong>
+                          <span>Test execution</span>
+                          <strong>
+                            {currentTestCommandStatus === "Test command passed"
+                              ? "✓ "
+                              : ""}
+                            {currentTestCommandStatus}
+                          </strong>
+                          {showTestFileIntegrityWarning && (
+                            <small className="test-integrity-warning">
+                              ⚠ Test files were modified during this Run
+                            </small>
+                          )}
                         </div>
                         <div>
                           <span>Authority blocks</span>

@@ -1388,6 +1388,12 @@ textarea:focus {
   font-size: 8px;
 }
 
+.evidence-summary .test-integrity-warning {
+  color: #9a642f;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
 .recovery-card {
   display: flex;
   align-items: center;
