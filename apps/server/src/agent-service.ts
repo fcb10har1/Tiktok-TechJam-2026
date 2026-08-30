@@ -29,6 +29,7 @@ import type {
   ExecutionContractV1,
   Message,
   RunEvent,
+  RunStatus,
   RunnerResult,
   UpdateAgentInput,
 } from "./types.js";
@@ -44,6 +45,11 @@ import {
   compareWorkspaceManifests,
   type WorkspaceDiffStatus,
 } from "./workspace-manifest.js";
+import {
+  RollbackSnapshotError,
+  RollbackSnapshotManager,
+  type CreatedRollbackSnapshot,
+} from "./rollback-snapshot.js";
 
 const now = () => new Date().toISOString();
 export const AI_PROPOSAL_UNAVAILABLE_NOTICE =
@@ -124,7 +130,10 @@ const unavailablePlanner: ContractPlanner = {
 
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
+  private readonly activeRecoveries = new Map<string, Promise<AgentRun>>();
+  private readonly activeSubmissions = new Set<string>();
   private readonly cancellationRequests = new Set<string>();
+  private readonly rollbackSnapshots: RollbackSnapshotManager;
 
   constructor(
     private readonly config: AppConfig,
@@ -133,11 +142,17 @@ export class AgentService {
     private readonly runner: AgentRunner,
     private readonly planner: ContractPlanner = unavailablePlanner,
     private readonly logPlannerDiagnostic: PlannerDiagnosticLogger = () => undefined,
-  ) {}
+    rollbackSnapshots?: RollbackSnapshotManager,
+  ) {
+    this.rollbackSnapshots =
+      rollbackSnapshots ??
+      new RollbackSnapshotManager(config.dataDirectory, config.workspaceRoot);
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize();
     await this.workspaces.initialize();
+    await this.rollbackSnapshots.initialize(this.store.snapshot().agents);
     await this.store.mutate((database) => {
       for (const run of database.runs) {
         if (run.status === "queued" || run.status === "running") {
@@ -218,6 +233,7 @@ export class AgentService {
 
   async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
     const agent = this.getAgent(id);
+    await this.waitForRecovery(id);
     await this.cancelExecution(id);
     const archivedWorkspace = await this.workspaces.archive(agent);
     await this.store.mutate((database) => {
@@ -225,6 +241,7 @@ export class AgentService {
       database.messages = database.messages.filter((item) => item.agentId !== id);
       database.runs = database.runs.filter((item) => item.agentId !== id);
     });
+    await this.rollbackSnapshots.removeAgent(id).catch(() => undefined);
     return { archivedWorkspace };
   }
 
@@ -234,6 +251,7 @@ export class AgentService {
 
   async stopAgent(id: string): Promise<Agent> {
     this.getAgent(id);
+    await this.waitForRecovery(id);
     await this.cancelAwaitingRuns(id);
     await this.cancelExecution(id);
     return this.setStatus(id, "stopped");
@@ -280,64 +298,75 @@ export class AgentService {
     if (agentForPlanning.status === "busy") {
       throw new HttpError(409, "This Agent is already running");
     }
-
-    let proposal: ContractProposal | null = null;
-    let proposalFailure: ContractPlanningError | null = null;
-    try {
-      proposal = await this.generateContractProposal(agentForPlanning, prompt);
-    } catch (error) {
-      proposalFailure = planningError(error);
-      this.reportPlannerFailure("proposal", proposalFailure);
-      proposal = null;
+    if (
+      this.activeRecoveries.has(agentId) ||
+      this.activeSubmissions.has(agentId)
+    ) {
+      throw new HttpError(409, "This Agent already has an active operation");
     }
 
-    const timestamp = now();
-    const runId = randomUUID();
-    const run: AgentRun = {
-      id: runId,
-      agentId,
-      status: "awaiting_approval",
-      prompt,
-      output: null,
-      error: null,
-      usage: null,
-      startedAt: null,
-      completedAt: null,
-      createdAt: timestamp,
-      events: [],
-      executionContract: this.buildExecutionContract(
+    this.activeSubmissions.add(agentId);
+    try {
+      let proposal: ContractProposal | null = null;
+      let proposalFailure: ContractPlanningError | null = null;
+      try {
+        proposal = await this.generateContractProposal(agentForPlanning, prompt);
+      } catch (error) {
+        proposalFailure = planningError(error);
+        this.reportPlannerFailure("proposal", proposalFailure);
+        proposal = null;
+      }
+
+      const timestamp = now();
+      const runId = randomUUID();
+      const run: AgentRun = {
+        id: runId,
+        agentId,
+        status: "awaiting_approval",
         prompt,
-        proposal,
-        proposalFailure,
-        timestamp,
-      ),
-    };
-    const message: Message = {
-      id: randomUUID(),
-      agentId,
-      runId,
-      role: "user",
-      content: prompt,
-      createdAt: timestamp,
-    };
-    await this.store.mutate((database) => {
-      const storedAgent = database.agents.find((item) => item.id === agentId);
-      if (!storedAgent) {
-        throw new HttpError(404, "Agent not found");
-      }
-      if (storedAgent.status === "stopped") {
-        throw new HttpError(409, "Start the Agent before sending a message");
-      }
-      if (storedAgent.status === "busy") {
-        throw new HttpError(409, "This Agent is already running");
-      }
-      database.runs.push(run);
-      database.messages.push(message);
-      storedAgent.status = "busy";
-      storedAgent.lastError = null;
-      storedAgent.updatedAt = timestamp;
-    });
-    return { run, message };
+        output: null,
+        error: null,
+        usage: null,
+        startedAt: null,
+        completedAt: null,
+        createdAt: timestamp,
+        events: [],
+        executionContract: this.buildExecutionContract(
+          prompt,
+          proposal,
+          proposalFailure,
+          timestamp,
+        ),
+      };
+      const message: Message = {
+        id: randomUUID(),
+        agentId,
+        runId,
+        role: "user",
+        content: prompt,
+        createdAt: timestamp,
+      };
+      await this.store.mutate((database) => {
+        const storedAgent = database.agents.find((item) => item.id === agentId);
+        if (!storedAgent) {
+          throw new HttpError(404, "Agent not found");
+        }
+        if (storedAgent.status === "stopped") {
+          throw new HttpError(409, "Start the Agent before sending a message");
+        }
+        if (storedAgent.status === "busy") {
+          throw new HttpError(409, "This Agent is already running");
+        }
+        database.runs.push(run);
+        database.messages.push(message);
+        storedAgent.status = "busy";
+        storedAgent.lastError = null;
+        storedAgent.updatedAt = timestamp;
+      });
+      return { run, message };
+    } finally {
+      this.activeSubmissions.delete(agentId);
+    }
   }
 
   async updateExecutionContract(
@@ -655,6 +684,32 @@ export class AgentService {
     });
   }
 
+  async rollbackRun(runId: string): Promise<AgentRun> {
+    const run = this.getRun(runId);
+    if (run.rollback?.status === "restored") return run;
+    if (!(["completed", "failed", "cancelled"] as RunStatus[]).includes(run.status)) {
+      throw new HttpError(409, "Only a terminal Run can be rolled back");
+    }
+    if (this.activeExecutions.has(run.agentId)) {
+      throw new HttpError(409, "Wait for the active Run to finish before rollback");
+    }
+    if (this.activeSubmissions.has(run.agentId)) {
+      throw new HttpError(409, "Wait for the pending task submission before rollback");
+    }
+    if (this.activeRecoveries.has(run.agentId)) {
+      throw new HttpError(409, "Rollback is already in progress for this Agent");
+    }
+    const recovery = this.performRollback(runId);
+    this.activeRecoveries.set(run.agentId, recovery);
+    try {
+      return await recovery;
+    } finally {
+      if (this.activeRecoveries.get(run.agentId) === recovery) {
+        this.activeRecoveries.delete(run.agentId);
+      }
+    }
+  }
+
   async systemInfo(): Promise<Record<string, unknown>> {
     return {
       arkConfigured: isArkConfigured(this.config),
@@ -776,6 +831,8 @@ export class AgentService {
   private async executeRun(agentAtStart: Agent, runId: string): Promise<void> {
     let executionEvents: RunEvent[] = [];
     let workspaceDiffStatus: WorkspaceDiffStatus | undefined;
+    let rollbackSnapshot: CreatedRollbackSnapshot | undefined;
+    let executionBoundaryCommitted = false;
     try {
       const run = await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === runId);
@@ -801,8 +858,75 @@ export class AgentService {
         writablePaths: run.executionContract.writablePaths,
         protectedPaths: run.executionContract.protectedPaths,
       });
+      rollbackSnapshot = await this.rollbackSnapshots.create(
+        agentAtStart.id,
+        runId,
+        agentAtStart.workspacePath,
+      );
+      await this.store.mutate((database) => {
+        const storedRun = database.runs.find((item) => item.id === runId);
+        if (!storedRun || storedRun.status !== "running") {
+          throw new Error("Run changed while its rollback snapshot was being created");
+        }
+        storedRun.rollback = {
+          status: "available",
+          snapshotId: rollbackSnapshot!.snapshotId,
+          snapshotCreatedAt: rollbackSnapshot!.createdAt,
+        };
+      });
       const beforeManifest = await captureWorkspaceManifest(
         agentAtStart.workspacePath,
+      );
+      if (!this.rollbackSnapshots.matchesPreManifest(rollbackSnapshot, beforeManifest)) {
+        throw new RollbackSnapshotError(
+          "PRE workspace state did not match its rollback snapshot",
+          "snapshot_failed",
+        );
+      }
+      if (this.cancellationRequests.has(agentAtStart.id)) {
+        throw new RunCancelledError();
+      }
+      const executionBoundaryAt = now();
+      const supersededSnapshots = await this.store.mutate((database) => {
+        const storedRun = database.runs.find((item) => item.id === runId);
+        if (
+          !storedRun ||
+          storedRun.status !== "running" ||
+          storedRun.rollback?.status !== "available"
+        ) {
+          throw new Error("Run cannot cross the execution boundary safely");
+        }
+        storedRun.rollback.executionBoundaryAt = executionBoundaryAt;
+        const superseded: Array<{ agentId: string; snapshotId: string }> = [];
+        for (const olderRun of database.runs) {
+          if (
+            olderRun.id === runId ||
+            olderRun.agentId !== agentAtStart.id ||
+            olderRun.rollback?.status !== "available" ||
+            !olderRun.rollback.snapshotId
+          ) {
+            continue;
+          }
+          superseded.push({
+            agentId: olderRun.agentId,
+            snapshotId: olderRun.rollback.snapshotId,
+          });
+          olderRun.rollback = {
+            ...olderRun.rollback,
+            status: "unavailable",
+            unavailableReason: "newer_run_executed",
+            supersededByRunId: runId,
+          };
+        }
+        return superseded;
+      });
+      executionBoundaryCommitted = true;
+      await Promise.all(
+        supersededSnapshots.map((snapshot) =>
+          this.rollbackSnapshots
+            .remove(snapshot.agentId, snapshot.snapshotId)
+            .catch(() => undefined),
+        ),
       );
       let result: RunnerResult;
       try {
@@ -860,7 +984,18 @@ export class AgentService {
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
-      const message = error instanceof Error ? error.message : String(error);
+      const snapshotFailed =
+        error instanceof RollbackSnapshotError && !executionBoundaryCommitted;
+      if (rollbackSnapshot && !executionBoundaryCommitted) {
+        await this.rollbackSnapshots
+          .remove(agentAtStart.id, rollbackSnapshot.snapshotId)
+          .catch(() => undefined);
+      }
+      const message = snapshotFailed
+        ? "Pre-run rollback snapshot could not be created; Codex was not started"
+        : error instanceof Error
+          ? error.message
+          : String(error);
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === runId);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
@@ -870,6 +1005,12 @@ export class AgentService {
           storedRun.events = executionEvents;
           if (workspaceDiffStatus) {
             storedRun.workspaceDiffStatus = workspaceDiffStatus;
+          }
+          if (!executionBoundaryCommitted && (snapshotFailed || rollbackSnapshot)) {
+            storedRun.rollback = {
+              status: "unavailable",
+              unavailableReason: "snapshot_failed",
+            };
           }
           storedRun.completedAt = completedAt;
         }
@@ -882,6 +1023,108 @@ export class AgentService {
         }
       });
     }
+  }
+
+  private async performRollback(runId: string): Promise<AgentRun> {
+    let priorAgentStatus: Agent["status"] = "ready";
+    const reserved = await this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run) throw new HttpError(404, "Run not found");
+      if (run.rollback?.status === "restored") return structuredClone(run);
+      if (!(["completed", "failed", "cancelled"] as RunStatus[]).includes(run.status)) {
+        throw new HttpError(409, "Only a terminal Run can be rolled back");
+      }
+      if (run.rollback?.status !== "available" || !run.rollback.snapshotId) {
+        const message =
+          run.rollback?.unavailableReason === "newer_run_executed"
+            ? "A newer Run has already changed this workspace"
+            : "This Run does not have an available rollback snapshot";
+        throw new HttpError(409, message);
+      }
+      const conflictingRun = database.runs.some(
+        (candidate) =>
+          candidate.id !== run.id &&
+          candidate.agentId === run.agentId &&
+          ["awaiting_approval", "queued", "running"].includes(candidate.status),
+      );
+      if (conflictingRun) {
+        throw new HttpError(
+          409,
+          "Resolve the newer pending or active Run before rollback",
+        );
+      }
+      const agent = database.agents.find((item) => item.id === run.agentId);
+      if (!agent) throw new HttpError(404, "Agent not found");
+      if (agent.status === "busy") {
+        throw new HttpError(409, "Wait for the active Agent operation to finish");
+      }
+      priorAgentStatus = agent.status;
+      agent.status = "busy";
+      agent.updatedAt = now();
+      return structuredClone(run);
+    });
+    if (reserved.rollback?.status === "restored") return reserved;
+
+    try {
+      await this.rollbackSnapshots.restore(
+        reserved.agentId,
+        reserved.id,
+        reserved.rollback!.snapshotId!,
+        this.getAgent(reserved.agentId).workspacePath,
+      );
+    } catch (error) {
+      const snapshotError =
+        error instanceof RollbackSnapshotError ? error : undefined;
+      await this.store.mutate((database) => {
+        const run = database.runs.find((item) => item.id === runId);
+        const agent = run
+          ? database.agents.find((item) => item.id === run.agentId)
+          : undefined;
+        if (
+          run?.rollback?.status === "available" &&
+          (snapshotError?.code === "snapshot_missing" ||
+            snapshotError?.code === "snapshot_corrupt")
+        ) {
+          run.rollback = {
+            ...run.rollback,
+            status: "unavailable",
+            unavailableReason:
+              snapshotError.code === "snapshot_missing"
+                ? "snapshot_missing"
+                : "snapshot_corrupt",
+          };
+        }
+        if (agent?.status === "busy") {
+          agent.status = priorAgentStatus;
+          agent.updatedAt = now();
+        }
+      });
+      const message =
+        snapshotError?.code === "snapshot_missing"
+          ? "Rollback snapshot is missing"
+          : snapshotError?.code === "snapshot_corrupt"
+            ? "Rollback snapshot is corrupt"
+            : "Workspace rollback could not be completed safely";
+      throw new HttpError(409, message);
+    }
+
+    const restoredAt = now();
+    const restored = await this.store.mutate((database) => {
+      const run = database.runs.find((item) => item.id === runId);
+      if (!run?.rollback || run.rollback.status !== "available") {
+        throw new Error("Rollback state changed during workspace restoration");
+      }
+      const agent = database.agents.find((item) => item.id === run.agentId);
+      if (!agent) throw new HttpError(404, "Agent not found");
+      run.rollback = { ...run.rollback, status: "restored", restoredAt };
+      agent.status = priorAgentStatus;
+      agent.updatedAt = restoredAt;
+      return structuredClone(run);
+    });
+    await this.rollbackSnapshots
+      .remove(restored.agentId, restored.rollback!.snapshotId!)
+      .catch(() => undefined);
+    return restored;
   }
 
   private async setStatus(id: string, status: Agent["status"]): Promise<Agent> {
@@ -911,6 +1154,11 @@ export class AgentService {
     } finally {
       this.cancellationRequests.delete(agentId);
     }
+  }
+
+  private async waitForRecovery(agentId: string): Promise<void> {
+    const recovery = this.activeRecoveries.get(agentId);
+    if (recovery) await recovery.catch(() => undefined);
   }
 
   private async cancelAwaitingRuns(agentId: string): Promise<void> {

@@ -90,6 +90,20 @@ export interface ExecutionContractV1 {
 
 export type ExecutionContract = ExecutionContractV0 | ExecutionContractV1;
 
+export interface RunRollback {
+  status: "available" | "restored" | "unavailable";
+  snapshotId?: string;
+  snapshotCreatedAt?: string;
+  executionBoundaryAt?: string;
+  restoredAt?: string;
+  unavailableReason?:
+    | "snapshot_failed"
+    | "newer_run_executed"
+    | "snapshot_missing"
+    | "snapshot_corrupt";
+  supersededByRunId?: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -114,6 +128,7 @@ export interface AgentRun {
   }>;
   events?: RunEvent[];
   workspaceDiffStatus?: "complete" | "partial" | "unavailable";
+  rollback?: RunRollback;
 }
 
 export interface SystemInfo {

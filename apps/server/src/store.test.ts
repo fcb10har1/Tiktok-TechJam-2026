@@ -34,6 +34,12 @@ describe("JsonStore", () => {
         completedAt: "2026-08-30T00:00:01.000Z",
         createdAt: "2026-08-30T00:00:00.000Z",
         workspaceDiffStatus: "complete",
+        rollback: {
+          status: "available",
+          snapshotId: "run-1",
+          snapshotCreatedAt: "2026-08-30T00:00:00.100Z",
+          executionBoundaryAt: "2026-08-30T00:00:00.200Z",
+        },
         events: [
           {
             id: "codex-item-1",
@@ -57,6 +63,12 @@ describe("JsonStore", () => {
       expect.objectContaining({ kind: "verify", outcome: "success" }),
     ]);
     expect(restarted.snapshot().runs[0]?.workspaceDiffStatus).toBe("complete");
+    expect(restarted.snapshot().runs[0]?.rollback).toEqual({
+      status: "available",
+      snapshotId: "run-1",
+      snapshotCreatedAt: "2026-08-30T00:00:00.100Z",
+      executionBoundaryAt: "2026-08-30T00:00:00.200Z",
+    });
   });
 
   it("does not publish a mutation in memory when persistence fails", async () => {

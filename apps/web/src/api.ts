@@ -117,4 +117,8 @@ export const api = {
     request<{ run: AgentRun }>("/api/runs/" + id + "/cancel", {
       method: "POST",
     }),
+  rollbackRun: (id: string) =>
+    request<{ run: AgentRun }>("/api/runs/" + id + "/rollback", {
+      method: "POST",
+    }),
 };

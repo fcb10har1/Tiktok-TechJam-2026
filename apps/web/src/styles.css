@@ -1388,6 +1388,38 @@ textarea:focus {
   font-size: 8px;
 }
 
+.recovery-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d9ddd7;
+  border-radius: 10px;
+  background: #f7f9f6;
+}
+
+.recovery-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.recovery-card strong {
+  font-size: 11px;
+}
+
+.recovery-card p {
+  margin: 0;
+  color: #6f716a;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.recovery-success {
+  color: #277557;
+}
+
 .changed-file-details {
   color: #62635e;
   font-size: 8px;

@@ -104,6 +104,7 @@ export default function App() {
   const [proposalRetryNotice, setProposalRetryNotice] = useState<string | null>(
     null,
   );
+  const [rollingBack, setRollingBack] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -474,6 +475,27 @@ export default function App() {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const rollbackRun = async () => {
+    if (!activeRun || activeRun.rollback?.status !== "available") return;
+    setRollingBack(true);
+    setError(null);
+    try {
+      const { run } = await api.rollbackRun(activeRun.id);
+      setActiveRun(run);
+      await refreshAgents();
+    } catch (reason) {
+      try {
+        const { run } = await api.run(activeRun.id);
+        setActiveRun(run);
+      } catch {
+        // Preserve the current Run if it cannot be refreshed.
+      }
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRollingBack(false);
     }
   };
 
@@ -1192,6 +1214,48 @@ export default function App() {
                           </strong>
                         </div>
                       </div>
+                      {activeRun.rollback && (
+                        <section className="recovery-card">
+                          <div>
+                            <span className="eyebrow">Recovery</span>
+                            {activeRun.rollback.status === "available" ? (
+                              <>
+                                <strong>Pre-run snapshot available</strong>
+                                <p>
+                                  Restore the workspace to its trusted state immediately
+                                  before this Run executed.
+                                </p>
+                              </>
+                            ) : activeRun.rollback.status === "restored" ? (
+                              <>
+                                <strong className="recovery-success">✓ Rolled back</strong>
+                                <p>Workspace restored to its pre-run state.</p>
+                              </>
+                            ) : activeRun.rollback.unavailableReason ===
+                              "newer_run_executed" ? (
+                              <>
+                                <strong>Rollback unavailable</strong>
+                                <p>A newer Run has already changed this workspace.</p>
+                              </>
+                            ) : (
+                              <>
+                                <strong>Rollback unavailable</strong>
+                                <p>A complete trusted pre-run snapshot is not available.</p>
+                              </>
+                            )}
+                          </div>
+                          {activeRun.rollback.status === "available" && (
+                            <button
+                              type="button"
+                              className="button button-ghost"
+                              disabled={rollingBack || busy}
+                              onClick={() => void rollbackRun()}
+                            >
+                              {rollingBack ? <Spinner /> : "Rollback changes"}
+                            </button>
+                          )}
+                        </section>
+                      )}
                     </article>
                   )}
                 {activeRun?.status === "failed" && (

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -324,8 +324,10 @@ describe("Agent lifecycle", () => {
     await service.approveRun(run.id);
     await expect.poll(() => service.getRun(run.id).status).toBe("failed");
 
+    const historicalEvents = structuredClone(service.getRun(run.id).events);
     expect(service.getRun(run.id)).toMatchObject({
       workspaceDiffStatus: "complete",
+      rollback: { status: "available" },
       events: [
         {
           kind: "modify",
@@ -339,6 +341,68 @@ describe("Agent lifecycle", () => {
         },
       ],
     });
+
+    const restored = await service.rollbackRun(run.id);
+    expect(await readFile(path.join(agent.workspacePath, "src", "auth.ts"), "utf8"))
+      .toBe("BEFORE\n");
+    expect(restored.rollback?.status).toBe("restored");
+    expect(restored.events).toEqual(historicalEvents);
+  });
+
+  it("restores a complete multi-file Run without invoking the runner or planner again", async () => {
+    const calls: RunnerRequest[] = [];
+    const runner: AgentRunner = {
+      async run(request) {
+        calls.push(structuredClone(request));
+        await writeFile(path.join(request.workspacePath, "src", "auth.ts"), "CHANGED");
+        await rm(path.join(request.workspacePath, "src", "old.ts"));
+        await mkdir(path.join(request.workspacePath, "src", "new", "nested"), {
+          recursive: true,
+        });
+        await writeFile(
+          path.join(request.workspacePath, "src", "new", "nested", "created.ts"),
+          "created",
+        );
+        return { output: "Done", threadId: "rollback-thread", usage: null, events: [] };
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const planner = new FakePlanner();
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Recoverable" });
+    await mkdir(path.join(agent.workspacePath, "src"));
+    await writeFile(path.join(agent.workspacePath, "src", "auth.ts"), "ORIGINAL");
+    await writeFile(path.join(agent.workspacePath, "src", "old.ts"), "OLD");
+    const { run } = await service.sendMessage(agent.id, "change several files");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    const eventsBeforeRollback = structuredClone(service.getRun(run.id).events);
+
+    const restored = await service.rollbackRun(run.id);
+
+    expect(await readFile(path.join(agent.workspacePath, "src", "auth.ts"), "utf8"))
+      .toBe("ORIGINAL");
+    expect(await readFile(path.join(agent.workspacePath, "src", "old.ts"), "utf8"))
+      .toBe("OLD");
+    await expect(
+      readFile(path.join(agent.workspacePath, "src", "new", "nested", "created.ts")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(restored).toMatchObject({
+      rollback: { status: "restored", restoredAt: expect.any(String) },
+    });
+    expect(restored.events).toEqual(eventsBeforeRollback);
+    expect(calls).toHaveLength(1);
+    expect(planner.calls).toHaveLength(1);
+
+    const duplicate = await service.rollbackRun(run.id);
+    expect(duplicate.rollback?.status).toBe("restored");
+    expect(calls).toHaveLength(1);
+    expect(planner.calls).toHaveLength(1);
   });
 
   it("captures PRE after authority placeholders so they are not Agent creations", async () => {
@@ -373,6 +437,12 @@ describe("Agent lifecycle", () => {
     ]);
     expect(completed.events?.filter((event) => event.kind === "create")).toEqual([]);
     expect(completed.workspaceDiffStatus).toBe("complete");
+    expect(completed.rollback?.status).toBe("available");
+
+    await service.rollbackRun(run.id);
+    expect(
+      await readFile(path.join(agent.workspacePath, "src", "secrets.ts"), "utf8"),
+    ).toBe("");
   });
 
   it("triggers preflight planning and persists a validated AI proposal", async () => {
@@ -1131,6 +1201,182 @@ describe("Agent lifecycle", () => {
     });
     expect(restarted.getAgent(agent.id).status).toBe("busy");
     expect(runnerAfterRestart.calls).toHaveLength(0);
+  });
+
+  it("persists a rollback snapshot across restart and restores without a new runner call", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-rollback-restart-"));
+    temporaryDirectories.push(root);
+    const config = loadConfig({
+      NODE_ENV: "test",
+      APP_DATA_DIR: path.join(root, "data"),
+      AGENT_WORKSPACE_ROOT: path.join(root, "workspaces"),
+      CODEX_HOME: path.join(root, "codex"),
+      ARK_API_KEY: "test-key",
+      ARK_MODEL: "ep-test",
+      RUNTIME_PROVIDER: "container",
+    });
+    const workspace = new WorkspaceManager(path.join(root, "workspaces"));
+    const firstRunner: AgentRunner = {
+      async run(request) {
+        await writeFile(path.join(request.workspacePath, "src", "state.ts"), "AFTER");
+        return { output: "Done", threadId: null, usage: null, events: [] };
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const first = new AgentService(
+      config,
+      new JsonStore(path.join(root, "data", "db.json")),
+      workspace,
+      firstRunner,
+      new FakePlanner(),
+    );
+    await first.initialize();
+    const agent = await first.createAgent({ name: "Restart recovery" });
+    await mkdir(path.join(agent.workspacePath, "src"));
+    await writeFile(path.join(agent.workspacePath, "src", "state.ts"), "BEFORE");
+    const { run } = await first.sendMessage(agent.id, "change state");
+    await first.approveRun(run.id);
+    await expect.poll(() => first.getRun(run.id).status).toBe("completed");
+
+    const runnerAfterRestart = new FakeRunner();
+    const restarted = new AgentService(
+      config,
+      new JsonStore(path.join(root, "data", "db.json")),
+      workspace,
+      runnerAfterRestart,
+      new FakePlanner(),
+    );
+    await restarted.initialize();
+    const restored = await restarted.rollbackRun(run.id);
+
+    expect(restored.rollback?.status).toBe("restored");
+    expect(await readFile(path.join(agent.workspacePath, "src", "state.ts"), "utf8"))
+      .toBe("BEFORE");
+    expect(runnerAfterRestart.calls).toHaveLength(0);
+  });
+
+  it("marks a missing snapshot unavailable without changing the workspace", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Missing snapshot" });
+    const { run } = await service.sendMessage(agent.id, "inspect source");
+    await service.approveRun(run.id);
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    const completed = service.getRun(run.id);
+    const dataRoot = path.join(path.dirname(path.dirname(agent.workspacePath)), "data");
+    await rm(
+      path.join(
+        dataRoot,
+        "rollback-snapshots",
+        agent.id,
+        completed.rollback!.snapshotId!,
+      ),
+      { recursive: true },
+    );
+    const readmeBefore = await readFile(path.join(agent.workspacePath, "README.md"), "utf8");
+
+    await expect(service.rollbackRun(run.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: "Rollback snapshot is missing",
+    });
+    expect(service.getRun(run.id).rollback).toMatchObject({
+      status: "unavailable",
+      unavailableReason: "snapshot_missing",
+    });
+    expect(await readFile(path.join(agent.workspacePath, "README.md"), "utf8"))
+      .toBe(readmeBefore);
+  });
+
+  it("temporarily rejects rollback while a newer Run awaits approval", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Pending newer Run" });
+    const { run: firstRun } = await service.sendMessage(agent.id, "first");
+    await service.approveRun(firstRun.id);
+    await expect.poll(() => service.getRun(firstRun.id).status).toBe("completed");
+    const { run: pendingRun } = await service.sendMessage(agent.id, "second");
+
+    await expect(service.rollbackRun(firstRun.id)).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining("pending or active Run"),
+    });
+    expect(service.getRun(firstRun.id).rollback?.status).toBe("available");
+    await service.cancelRun(pendingRun.id);
+  });
+
+  it("preserves the older snapshot when a newer pre-run snapshot fails", async () => {
+    const runner = new FakeRunner();
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Failed newer snapshot" });
+    const { run: firstRun } = await service.sendMessage(agent.id, "first");
+    await service.approveRun(firstRun.id);
+    await expect.poll(() => service.getRun(firstRun.id).status).toBe("completed");
+    const { run: secondRun } = await service.sendMessage(agent.id, "second");
+    await writeFile(
+      path.join(agent.workspacePath, "too-large.bin"),
+      Buffer.alloc(10 * 1024 * 1024 + 1),
+    );
+
+    await service.approveRun(secondRun.id);
+    await expect.poll(() => service.getRun(secondRun.id).status).toBe("failed");
+
+    expect(runner.calls).toHaveLength(1);
+    expect(service.getRun(firstRun.id).rollback?.status).toBe("available");
+    expect(service.getRun(secondRun.id).rollback).toEqual({
+      status: "unavailable",
+      unavailableReason: "snapshot_failed",
+    });
+    expect(service.getRun(secondRun.id).error).toContain("Codex was not started");
+  });
+
+  it("supersedes the older snapshot only when the newer runner boundary is reached", async () => {
+    let releaseSecond!: () => void;
+    const calls: RunnerRequest[] = [];
+    const runner: AgentRunner = {
+      async run(request) {
+        calls.push(structuredClone(request));
+        if (calls.length === 2) {
+          await new Promise<void>((resolve) => {
+            releaseSecond = resolve;
+          });
+        }
+        return { output: "Done", threadId: null, usage: null, events: [] };
+      },
+      async cancel() {
+        return false;
+      },
+      async isAvailable() {
+        return true;
+      },
+    };
+    const service = await makeService(runner);
+    const agent = await service.createAgent({ name: "Supersession boundary" });
+    const { run: firstRun } = await service.sendMessage(agent.id, "first");
+    await service.approveRun(firstRun.id);
+    await expect.poll(() => service.getRun(firstRun.id).status).toBe("completed");
+    const { run: secondRun } = await service.sendMessage(agent.id, "second");
+    expect(service.getRun(firstRun.id).rollback?.status).toBe("available");
+
+    await service.approveRun(secondRun.id);
+    await expect.poll(() => calls.length).toBe(2);
+
+    expect(service.getRun(firstRun.id).rollback).toMatchObject({
+      status: "unavailable",
+      unavailableReason: "newer_run_executed",
+      supersededByRunId: secondRun.id,
+    });
+    expect(service.getRun(secondRun.id).rollback).toMatchObject({
+      status: "available",
+      executionBoundaryAt: expect.any(String),
+    });
+    await expect(service.rollbackRun(secondRun.id)).rejects.toMatchObject({
+      statusCode: 409,
+    });
+    releaseSecond();
+    await expect.poll(() => service.getRun(secondRun.id).status).toBe("completed");
   });
 
   it("atomically accepts only one pending Run per Agent", async () => {

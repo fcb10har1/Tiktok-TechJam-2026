@@ -68,6 +68,11 @@ describe("HTTP boundary", () => {
       })),
       approveRun: vi.fn(async () => ({ ...run, status: "queued" })),
       cancelRun: vi.fn(async () => ({ ...run, status: "cancelled" })),
+      rollbackRun: vi.fn(async () => ({
+        ...run,
+        status: "completed",
+        rollback: { status: "restored" },
+      })),
     } as unknown as AgentService;
     const app = await createApp(loadConfig({ NODE_ENV: "test" }), contractService);
 
@@ -126,6 +131,16 @@ describe("HTTP boundary", () => {
     });
     expect(cancelled.statusCode).toBe(200);
     expect(contractService.cancelRun).toHaveBeenCalledWith(runId);
+
+    const rolledBack = await app.inject({
+      method: "POST",
+      url: "/api/runs/" + runId + "/rollback",
+    });
+    expect(rolledBack.statusCode).toBe(200);
+    expect(rolledBack.json()).toMatchObject({
+      run: { rollback: { status: "restored" } },
+    });
+    expect(contractService.rollbackRun).toHaveBeenCalledWith(runId);
 
     const malformed = await app.inject({
       method: "PATCH",

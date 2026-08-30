@@ -90,6 +90,22 @@ export interface ExecutionContractV1 {
 
 export type ExecutionContract = ExecutionContractV0 | ExecutionContractV1;
 
+export type RollbackUnavailableReason =
+  | "snapshot_failed"
+  | "newer_run_executed"
+  | "snapshot_missing"
+  | "snapshot_corrupt";
+
+export interface RunRollback {
+  status: "available" | "restored" | "unavailable";
+  snapshotId?: string;
+  snapshotCreatedAt?: string;
+  executionBoundaryAt?: string;
+  restoredAt?: string;
+  unavailableReason?: RollbackUnavailableReason;
+  supersededByRunId?: string;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -105,6 +121,7 @@ export interface AgentRun {
   authorityPreparations?: AuthorityPreparation[];
   events?: RunEvent[];
   workspaceDiffStatus?: "complete" | "partial" | "unavailable";
+  rollback?: RunRollback;
 }
 
 export type AuthorityTargetKind = "file" | "directory";
