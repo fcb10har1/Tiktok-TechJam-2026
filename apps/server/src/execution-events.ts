@@ -131,6 +131,9 @@ function inspectedPath(command: string): string | null {
 
 function isVerificationCommand(command: string): boolean {
   const body = commandBody(command);
+  // The recorded exit status belongs to the complete shell expression. Do not
+  // attribute it to a test command when composition can alter or mask the result.
+  if (/(?:&&|\|\||[;|])/.test(body)) return false;
   return /^(?:npm\s+(?:test|run\s+test(?::[^\s]+)?)|pnpm\s+(?:test|run\s+test)|yarn\s+test|npx\s+vitest|vitest|pytest|python(?:3)?\s+-m\s+pytest|node\s+--test|cargo\s+test)(?:\s|$)/.test(
     body,
   );

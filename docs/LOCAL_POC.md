@@ -31,9 +31,16 @@ Persistent state defaults to:
 
 Set `LOCAL_POC_DATA_ROOT` to use another directory.
 
-Each turn mounts only the selected Agent workspace and Codex session directory.
+Each turn mounts only the selected Agent workspace plus the platform's shared
+`CODEX_HOME` at `/codex-home`. `CODEX_HOME` is shared across Agents and provides
+no per-Agent confidentiality or integrity boundary for Codex configuration or
+session data. Workspace write authority applies only to `/workspace`.
 Default limits are 2 CPUs, 2 GiB memory, 256 processes, dropped capabilities,
 and `no-new-privileges`.
+
+The default Runtime image includes Node.js and Python 3. Override
+`CONTAINER_RUNTIME_APT_PACKAGES` only when necessary, and retain `python3` if
+Python-based Agent tasks must work.
 
 Codex requests `workspace-write`. If the Linux kernel lacks Landlock, startup
 warns and disables only the inner Codex sandbox. The outer container limits
@@ -146,12 +153,19 @@ by creating a sibling temporary file and renaming it over the mounted file can
 fail with `EBUSY` because the file itself is a bind-mount point. Prefer directory
 scopes for normal app-building work. A future production design can use a
 staging workspace or OverlayFS for transparent atomic replacement and
-transactional commits; this POC intentionally does not provide staging or
-rollback.
+transactional commits; neither is implemented. The current rollback feature is
+instead a bounded restoration of an eligible complete pre-Run snapshot.
+
+Snapshot creation and matching PRE-state validation must complete before Codex
+starts. Defaults are 20,000 entries, 10,000 regular files, depth 64, 10 MiB per
+regular file, and 100 MiB total regular-file content. Exceeding a limit—often
+because dependencies, build output, or caches live inside the workspace—fails
+the Run before execution rather than creating an incomplete rollback point.
 
 The guarantee applies to the container's `/workspace` tree. It does not claim
 equivalent enforcement for the local-process Runtime, host administrators, or
-other host processes with direct access to the workspace.
+other host processes with direct access to the workspace. It also does not
+isolate one Agent's `/codex-home` data from another Agent.
 
 The ordinary test suite skips the Docker probe. Run it mandatorily with:
 

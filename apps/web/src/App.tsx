@@ -3,8 +3,10 @@ import { api, ApiError, setAuthToken } from "./api";
 import {
   displayableTechnicalCommandEvents,
   hasTestFileIntegrityWarning,
+  resultingRegularFileChangesLabel,
   testCommandStatus,
 } from "./observability";
+import { runsByOwnerMessageId } from "./run-history";
 import type { Agent, AgentRun, Message, RunEvent, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -176,25 +178,6 @@ function eventGlyph(event: RunEvent): string {
   if (event.kind === "blocked") return "🚫";
   if (event.kind === "warning") return "⚠";
   return event.outcome === "failure" ? "×" : "✓";
-}
-
-function changedFilesLabel(events: readonly RunEvent[], status: AgentRun["workspaceDiffStatus"]): string {
-  const changes = events.filter(
-    (event) =>
-      event.technical.source === "workspace-diff" &&
-      ["create", "modify", "delete"].includes(event.kind),
-  );
-  const labels = [
-    ["create", "created"],
-    ["modify", "modified"],
-    ["delete", "deleted"],
-  ] as const;
-  const parts = labels.flatMap(([kind, label]) => {
-    const count = changes.filter((event) => event.kind === kind).length;
-    return count > 0 ? [count + " " + label] : [];
-  });
-  if (parts.length > 0) return parts.join(" · ");
-  return status === "complete" ? "No resulting changes" : "Not observed";
 }
 
 function ApprovedContractRecord({
@@ -402,14 +385,15 @@ function ExecutionEvidenceCard({
           </details>
         )}
         <p className="evidence-net-state-note">
-          Workspace changes show the resulting PRE/POST state. Transient writes restored
-          before completion are not shown.
+          Regular-file content changes show the resulting PRE/POST state. Transient
+          writes restored before completion, symlinks, empty directories, and
+          metadata-only changes are not shown.
         </p>
       </section>
       <div className="evidence-summary">
         <div>
-          <span>Changed files</span>
-          <strong>{changedFilesLabel(executionEvents, run.workspaceDiffStatus)}</strong>
+          <span>Resulting regular-file content changes</span>
+          <strong>{resultingRegularFileChangesLabel(executionEvents, run.workspaceDiffStatus)}</strong>
           {workspaceMutationEvents.length > 0 && (
             <details className="changed-file-details">
               <summary>View files</summary>
@@ -516,19 +500,10 @@ export default function App() {
     () => agents.find((agent) => agent.id === selectedId) ?? null,
     [agents, selectedId],
   );
-  const runsById = useMemo(
-    () => new Map(runs.map((run) => [run.id, run])),
-    [runs],
+  const ownedRunsByMessageId = useMemo(
+    () => runsByOwnerMessageId(messages, runs),
+    [messages, runs],
   );
-  const runOwnerMessageIds = useMemo(() => {
-    const owners = new Map<string, string>();
-    for (const message of messages) {
-      if (message.role === "user" && !owners.has(message.runId)) {
-        owners.set(message.runId, message.id);
-      }
-    }
-    return owners;
-  }, [messages]);
 
   const rememberRun = useCallback((run: AgentRun) => {
     setActiveRun(run);
@@ -1033,7 +1008,7 @@ export default function App() {
                     id="contract-negotiation-input"
                     value={negotiationInstruction}
                     onChange={(event) => setNegotiationInstruction(event.target.value)}
-                    placeholder="Tell Ultr0n what you want changed…"
+                    placeholder="Tell Anti-Ultron what you want changed…"
                     rows={2}
                     maxLength={5_000}
                     disabled={busy || negotiatingContract || retryingProposal}
@@ -1198,10 +1173,10 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">U</div>
+          <div className="brand-mark">A</div>
           <div>
-            <strong>Ultr0n</strong>
-            <span>Zero-trust execution control</span>
+            <strong>Agent Launchpad</strong>
+            <span>Protected by Anti-Ultron</span>
           </div>
         </div>
 
@@ -1371,7 +1346,7 @@ export default function App() {
             <section className="playground">
               <div className="playground-topbar">
                 <div>
-                  <span className="eyebrow">Ultr0n control plane</span>
+                  <span className="eyebrow">Anti-Ultron control plane</span>
                   <h2>Plan, approve, execute</h2>
                 </div>
                 <div className="session-info">
@@ -1388,7 +1363,7 @@ export default function App() {
                     </div>
                     <h3>What should {selected.name} build?</h3>
                     <p>
-                      Describe the task. Ultr0n proposes workspace authority for your
+                      Describe the task. Anti-Ultron proposes workspace authority for your
                       review before Codex runs.
                     </p>
                     <div className="prompt-grid">
@@ -1402,11 +1377,7 @@ export default function App() {
                   </div>
                 ) : (
                   messages.map((message) => {
-                    const ownedRun =
-                      message.role === "user" &&
-                      runOwnerMessageIds.get(message.runId) === message.id
-                        ? runsById.get(message.runId)
-                        : undefined;
+                    const ownedRun = ownedRunsByMessageId.get(message.id);
                     return (
                       <Fragment key={message.id}>
                         <article className={"message message-" + message.role}>

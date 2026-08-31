@@ -195,7 +195,8 @@ const amendmentInstructions = [
   "Apply explicit human restrictions conservatively and preserve fields the human did not ask to change.",
   "Preserve every existing protected path unless the human explicitly requests that its protection be removed.",
   "Only list a path in removedProtectedPaths when the human explicitly requests removing that protection; otherwise return an empty removedProtectedPaths array.",
-  "Writable paths are advisory only. Protected paths are the only runtime-enforced filesystem restriction.",
+  "Runtime write authority is protected paths first, then approved writable paths, with every other workspace path read-only by default.",
+  "Never place an explicitly protected path inside writable scope; protected paths always win.",
   "Do not claim to have inspected file contents or executed commands.",
   "Return only the seven fields requested by the schema.",
 ].join("\n");

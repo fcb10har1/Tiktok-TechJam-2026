@@ -1,7 +1,8 @@
-# Security policy
+# Security
 
-Volc Agent Launchpad is a hackathon proof of concept. Only the latest revision
-on the default branch is supported.
+This document describes the security boundary and known limitations of Agent
+Launchpad when using the Anti-Ultron middleware and V1 container Runtime. Only
+the latest revision on the default branch is supported.
 
 ## Report a vulnerability
 
@@ -14,11 +15,15 @@ credentials, personal data, or exploit details in an issue.
 - Shared demo token; no user identity, authorization, RBAC, or tenant isolation
 - No CSRF protection
 - No per-Agent container boundary in ECS mode
+- Shared `/codex-home` across Agents; no per-Agent confidentiality or integrity
+  boundary for Codex configuration or session data
 - Ordinary local containers, not hardened multi-tenant sandboxes
 - Broad outbound network access
 - Prompt-triggered command and file execution
 - Ark key available to the server and active Runtime container
 - Ark key stored in Terraform POC state
+- Compose/ECS `local-process` is deployment scaffolding and cannot approve or
+  execute V1 workspace-authority contracts
 
 ## Safe use
 
@@ -32,3 +37,8 @@ credentials, personal data, or exploit details in an issue.
 Codex uses `workspace-write` when Landlock is available. On unsupported kernels,
 startup warns and relies on the outer Docker or rootless Podman boundary. This
 fallback is not tenant isolation.
+
+Execution Contract workspace authority applies only to the selected
+`/workspace` mount. It does not protect the shared `/codex-home`, provide
+workspace read confidentiality, or isolate Agents from an administrator or
+other host process.

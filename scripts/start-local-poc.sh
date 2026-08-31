@@ -8,7 +8,6 @@ runtime_image="${CONTAINER_RUNTIME_IMAGE:-volc-agent-runtime:local}"
 runtime_base_image="${CONTAINER_RUNTIME_BASE_IMAGE:-node:22-bookworm-slim}"
 runtime_apt_mirror="${CONTAINER_APT_MIRROR:-}"
 runtime_apt_security_mirror="${CONTAINER_APT_SECURITY_MIRROR:-}"
-runtime_apt_packages="${CONTAINER_RUNTIME_APT_PACKAGES:-ca-certificates git ripgrep}"
 codex_sandbox_mode="${CODEX_SANDBOX_MODE:-workspace-write}"
 
 log() {
@@ -110,13 +109,21 @@ mkdir -p "$APP_DATA_DIR" "$AGENT_WORKSPACE_ROOT" "$CODEX_HOME"
 log "Persistent state: $local_state_root"
 export CONTAINER_USER="${CONTAINER_USER:-$(id -u):$(id -g)}"
 
+runtime_build_args=(
+  --file Dockerfile.runtime
+  --build-arg "NODE_IMAGE=$runtime_base_image"
+  --build-arg "DEBIAN_MIRROR=$runtime_apt_mirror"
+  --build-arg "DEBIAN_SECURITY_MIRROR=$runtime_apt_security_mirror"
+)
+if [[ -n "${CONTAINER_RUNTIME_APT_PACKAGES:-}" ]]; then
+  runtime_build_args+=(
+    --build-arg "RUNTIME_APT_PACKAGES=$CONTAINER_RUNTIME_APT_PACKAGES"
+  )
+fi
+
 log "Building $runtime_image from Dockerfile.runtime (base: $runtime_base_image)."
 "$engine" build \
-  --file Dockerfile.runtime \
-  --build-arg "NODE_IMAGE=$runtime_base_image" \
-  --build-arg "DEBIAN_MIRROR=$runtime_apt_mirror" \
-  --build-arg "DEBIAN_SECURITY_MIRROR=$runtime_apt_security_mirror" \
-  --build-arg "RUNTIME_APT_PACKAGES=$runtime_apt_packages" \
+  "${runtime_build_args[@]}" \
   --tag "$runtime_image" \
   .
 
