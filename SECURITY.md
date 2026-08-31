@@ -1,7 +1,8 @@
-# Security policy
+# Security
 
-Volc Agent Launchpad is a hackathon proof of concept. Only the latest revision
-on the default branch is supported.
+This document describes the security boundary and known limitations of Agent
+Launchpad when using the Anti-Ultron middleware and V1 container Runtime. Only
+the latest revision on the default branch is supported.
 
 ## Report a vulnerability
 
