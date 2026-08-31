@@ -1008,7 +1008,7 @@ export default function App() {
                     id="contract-negotiation-input"
                     value={negotiationInstruction}
                     onChange={(event) => setNegotiationInstruction(event.target.value)}
-                    placeholder="Tell Ultr0n what you want changed…"
+                    placeholder="Tell Anti-Ultron what you want changed…"
                     rows={2}
                     maxLength={5_000}
                     disabled={busy || negotiatingContract || retryingProposal}
@@ -1133,7 +1133,7 @@ export default function App() {
       <main className="auth-screen">
         <section className="auth-card" aria-live="polite">
           <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <span className="eyebrow">Anti-Ultron</span>
           <h1>Connecting to the control plane</h1>
           {error ? <div className="error-banner" role="alert">{error}</div> : <Spinner />}
         </section>
@@ -1146,7 +1146,7 @@ export default function App() {
       <main className="auth-screen">
         <form className="auth-card" onSubmit={unlock}>
           <div className="brand-mark">A</div>
-          <span className="eyebrow">Agent Launchpad</span>
+          <span className="eyebrow">Anti-Ultron</span>
           <h1>Enter the access token</h1>
           <p>This shared demo token is configured by the platform operator.</p>
           {error && <div className="error-banner" role="alert">{error}</div>}
@@ -1175,7 +1175,7 @@ export default function App() {
         <div className="brand">
           <div className="brand-mark">U</div>
           <div>
-            <strong>Ultr0n</strong>
+            <strong>Anti-Ultron</strong>
             <span>Zero-trust execution control</span>
           </div>
         </div>
@@ -1346,7 +1346,7 @@ export default function App() {
             <section className="playground">
               <div className="playground-topbar">
                 <div>
-                  <span className="eyebrow">Ultr0n control plane</span>
+                  <span className="eyebrow">Anti-Ultron control plane</span>
                   <h2>Plan, approve, execute</h2>
                 </div>
                 <div className="session-info">
@@ -1363,7 +1363,7 @@ export default function App() {
                     </div>
                     <h3>What should {selected.name} build?</h3>
                     <p>
-                      Describe the task. Ultr0n proposes workspace authority for your
+                      Describe the task. Anti-Ultron proposes workspace authority for your
                       review before Codex runs.
                     </p>
                     <div className="prompt-grid">
@@ -1442,7 +1442,7 @@ export default function App() {
         ) : (
           <div className="no-agent">
             <div className="no-agent-art">A</div>
-            <span className="eyebrow">Agent Launchpad</span>
+            <span className="eyebrow">Anti-Ultron</span>
             <h1>Your runtime is ready for an Agent.</h1>
             <p>Create a workspace, give Codex a job, and continue the conversation here.</p>
             <button
