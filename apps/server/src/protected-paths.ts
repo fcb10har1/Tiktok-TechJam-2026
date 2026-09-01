@@ -1,6 +1,7 @@
 import path from "node:path";
 
 export const DEFAULT_PROTECTED_PATHS = [".env", "deployment"] as const;
+const MAX_WORKSPACE_PATHS = 100;
 
 export class InvalidProtectedPathError extends Error {
   constructor(message: string) {
@@ -50,6 +51,20 @@ export function normalizeWritablePaths(paths: readonly string[]): string[] {
   );
 }
 
+export function mergeProtectedPaths(
+  preservedPaths: readonly string[],
+  proposedPaths: readonly string[],
+): string[] {
+  let merged = normalizeProtectedPaths(preservedPaths);
+  for (const proposedPath of proposedPaths) {
+    if (merged.length >= MAX_WORKSPACE_PATHS) break;
+    const normalized = normalizeProtectedPaths([proposedPath]);
+    if (normalized.length === 0) continue;
+    merged = normalizeProtectedPaths([...merged, normalized[0]!]);
+  }
+  return merged;
+}
+
 export function isDirectoryScope(workspacePath: string): boolean {
   return workspacePath.endsWith("/**");
 }
@@ -68,7 +83,7 @@ function normalizeWorkspacePaths(
   paths: readonly string[],
   pathKind: "Protected" | "Writable",
 ): string[] {
-  if (paths.length > 100) {
+  if (paths.length > MAX_WORKSPACE_PATHS) {
     throw new InvalidProtectedPathError(
       "At most 100 " + pathKind.toLowerCase() + " paths are allowed",
     );

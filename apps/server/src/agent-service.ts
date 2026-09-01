@@ -16,6 +16,7 @@ import { mergeExecutionEvidence } from "./execution-events.js";
 import {
   DEFAULT_PROTECTED_PATHS,
   InvalidProtectedPathError,
+  mergeProtectedPaths,
   normalizeProtectedPaths,
   normalizeWritablePaths,
 } from "./protected-paths.js";
@@ -482,10 +483,10 @@ export class AgentService {
         );
       }
       Object.assign(storedRun.executionContract, proposal, {
-        protectedPaths: normalizeProtectedPaths([
-          ...contractAtStart.protectedPaths,
-          ...proposal.protectedPaths,
-        ]),
+        protectedPaths: mergeProtectedPaths(
+          contractAtStart.protectedPaths,
+          proposal.protectedPaths,
+        ),
         proposalSource: "ai",
         proposalNotice: null,
         approvedAt: null,
@@ -560,14 +561,14 @@ export class AgentService {
         );
       }
       const removals = new Set(amendment.removedProtectedPaths);
-      protectedPaths = normalizeProtectedPaths([
-        ...currentProtectedPaths.filter(
+      protectedPaths = mergeProtectedPaths(
+        currentProtectedPaths.filter(
           (protectedPath) => !removals.has(protectedPath),
         ),
-        ...amendment.protectedPaths.filter(
+        amendment.protectedPaths.filter(
           (protectedPath) => !removals.has(protectedPath),
         ),
-      ]);
+      );
     } catch (error) {
       this.reportPlannerFailure("negotiation", planningError(error));
       return preserveCurrentContract();
@@ -796,10 +797,10 @@ export class AgentService {
     try {
       return {
         ...proposal,
-        protectedPaths: normalizeProtectedPaths([
-          ...DEFAULT_PROTECTED_PATHS,
-          ...proposal.protectedPaths,
-        ]),
+        protectedPaths: mergeProtectedPaths(
+          DEFAULT_PROTECTED_PATHS,
+          proposal.protectedPaths,
+        ),
       };
     } catch {
       throw new ContractPlanningError(

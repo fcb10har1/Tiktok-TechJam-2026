@@ -132,6 +132,41 @@ describe("deterministic execution evidence", () => {
     ]);
   });
 
+  it("attributes a standalone protected-file append from pinned Codex command metadata", async () => {
+    const request = await workspaceRequest();
+    request.protectedPaths = [".env", "README.md"];
+    const collector = new ExecutionEventCollector(request, () => "fixture-time");
+
+    collector.consume(
+      commandEvent(
+        "protected-append",
+        '/bin/bash -lc \'echo "Greeting behavior verified." >> README.md\'',
+        "/bin/bash: line 1: README.md: Read-only file system\n",
+        1,
+      ),
+    );
+
+    expect(collector.events()).toMatchObject([
+      {
+        kind: "blocked",
+        outcome: "blocked",
+        path: "README.md",
+        authorityReason: "explicitly_protected",
+        technical: {
+          source: "codex-jsonl",
+          itemType: "command_execution",
+          itemId: "protected-append",
+          exitCode: 1,
+        },
+      },
+    ]);
+    expect(collector.events()[0]?.technical.command).toBeUndefined();
+    expect(JSON.stringify(collector.events())).not.toContain(
+      "Greeting behavior verified.",
+    );
+    expect(JSON.stringify(collector.events())).not.toContain("Read-only file system");
+  });
+
   it("does not call ambiguous or writable-path permission failures Ultr0n blocks", async () => {
     const request = await workspaceRequest();
     const collector = new ExecutionEventCollector(request, () => "fixture-time");

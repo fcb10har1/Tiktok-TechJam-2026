@@ -150,12 +150,24 @@ const contractJsonSchema = {
     writablePaths: {
       type: "array",
       maxItems: 100,
-      items: { type: "string", minLength: 1, maxLength: 512 },
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 512,
+        description:
+          "Workspace-relative POSIX exact path or directory scope ending in /**, for example src/auth.ts or src/**. Never use absolute paths or other glob syntax.",
+      },
     },
     protectedPaths: {
       type: "array",
       maxItems: 100,
-      items: { type: "string", minLength: 1, maxLength: 512 },
+      items: {
+        type: "string",
+        minLength: 1,
+        maxLength: 512,
+        description:
+          "Workspace-relative POSIX exact path or directory scope ending in /**, for example .env or deployment/**. Never use absolute paths or other glob syntax.",
+      },
     },
     riskLevel: { type: "string", enum: ["low", "medium", "high"] },
     rationale: {
@@ -175,10 +187,17 @@ const amendmentJsonSchema = {
     removedProtectedPaths: {
       type: "array",
       maxItems: 100,
-      items: { type: "string", minLength: 1, maxLength: 512 },
+      items: contractJsonSchema.properties.protectedPaths.items,
     },
   },
 } as const;
+
+const plannerPathInstructions = [
+  "Every writablePaths and protectedPaths entry must use workspace-relative POSIX syntax.",
+  "Use an exact path such as README.md or src/auth.ts, or a directory scope ending in /** such as src/**.",
+  "Never include /workspace/, an absolute path, a Windows path, . or .. path components, or commas.",
+  "The only supported wildcard is a terminal /**. Use src/**, never src/*, src/**/*, src/**/*.ts, **/.env, or .env*.",
+].join("\n");
 
 const proposalInstructions = [
   "You are a planning-only assistant that proposes an Execution Contract.",
@@ -186,6 +205,7 @@ const proposalInstructions = [
   "Propose the narrowest reasonable writable workspace-relative POSIX paths.",
   "Include sensitive or deployment-related paths that should remain protected.",
   "If exact writable files are uncertain, describe that uncertainty in the rationale and expose the broader scope for human approval.",
+  plannerPathInstructions,
   "Return only the six contract fields requested by the schema.",
 ].join("\n");
 
@@ -197,6 +217,8 @@ const amendmentInstructions = [
   "Only list a path in removedProtectedPaths when the human explicitly requests removing that protection; otherwise return an empty removedProtectedPaths array.",
   "Runtime write authority is protected paths first, then approved writable paths, with every other workspace path read-only by default.",
   "Never place an explicitly protected path inside writable scope; protected paths always win.",
+  plannerPathInstructions,
+  "Every removedProtectedPaths entry must follow the same strict path syntax.",
   "Do not claim to have inspected file contents or executed commands.",
   "Return only the seven fields requested by the schema.",
 ].join("\n");
@@ -348,6 +370,50 @@ function extractOutputText(responseBody: string): string {
   return outputText.join("");
 }
 
+function canonicalPlannerPath(rawPath: string): string {
+  let candidate = rawPath.trim();
+  if (
+    candidate.length >= 2 &&
+    ((candidate.startsWith("`") && candidate.endsWith("`")) ||
+      (candidate.startsWith('"') && candidate.endsWith('"')) ||
+      (candidate.startsWith("'") && candidate.endsWith("'")))
+  ) {
+    candidate = candidate.slice(1, -1).trim();
+  }
+  if (candidate === "/workspace") return "";
+  if (candidate.startsWith("/workspace/")) candidate = candidate.slice(11);
+
+  // Some planning models use conventional recursive glob spellings. Convert
+  // only unambiguous whole-directory suffixes; typed or mid-path globs remain
+  // invalid and are discarded by the strict validator below.
+  candidate = candidate
+    .replace(/\/\*\*\/\*\/?$/, "/**")
+    .replace(/\/\*\*\/\*\*\/?$/, "/**")
+    .replace(/\/\*\*\/+$/, "/**")
+    .replace(/\/\*\/?$/, "/**");
+  return candidate;
+}
+
+function sanitizePlannerPaths(
+  paths: readonly string[],
+  kind: "writable" | "protected",
+): string[] {
+  const normalize =
+    kind === "writable" ? normalizeWritablePaths : normalizeProtectedPaths;
+  const accepted: string[] = [];
+  for (const rawPath of paths) {
+    const candidate = canonicalPlannerPath(rawPath);
+    if (!candidate) continue;
+    try {
+      accepted.push(...normalize([candidate]));
+    } catch {
+      // Planner paths are untrusted proposals. Reject only the unsafe entry;
+      // every retained entry is still accepted by the authoritative validator.
+    }
+  }
+  return normalize(accepted);
+}
+
 export function parseContractProposal(value: unknown): ContractProposal {
   const result = proposalSchema.safeParse(value);
   if (!result.success) {
@@ -361,8 +427,8 @@ export function parseContractProposal(value: unknown): ContractProposal {
   try {
     return {
       ...result.data,
-      writablePaths: normalizeWritablePaths(result.data.writablePaths),
-      protectedPaths: normalizeProtectedPaths(result.data.protectedPaths),
+      writablePaths: sanitizePlannerPaths(result.data.writablePaths, "writable"),
+      protectedPaths: sanitizePlannerPaths(result.data.protectedPaths, "protected"),
     };
   } catch {
     throw new ContractPlanningError(
@@ -385,10 +451,11 @@ export function parseContractAmendment(value: unknown): ContractAmendment {
   try {
     return {
       ...result.data,
-      writablePaths: normalizeWritablePaths(result.data.writablePaths),
-      protectedPaths: normalizeProtectedPaths(result.data.protectedPaths),
-      removedProtectedPaths: normalizeProtectedPaths(
+      writablePaths: sanitizePlannerPaths(result.data.writablePaths, "writable"),
+      protectedPaths: sanitizePlannerPaths(result.data.protectedPaths, "protected"),
+      removedProtectedPaths: sanitizePlannerPaths(
         result.data.removedProtectedPaths,
+        "protected",
       ),
     };
   } catch {
