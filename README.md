@@ -564,59 +564,480 @@ Production dependency audit: 0 known vulnerabilities
 
 # Round 1 demo scenario
 
-The recorded demo uses one end-to-end scenario.
+The recorded demo uses one controlled end-to-end scenario to demonstrate Anti-Ultron's complete security loop:
+
+> **Plan → Permit → Enforce → Observe → Recover**
+
+The scenario is intentionally small so the demo focuses on the middleware rather than the coding difficulty.
+
+---
+
+## Starting workspace
+
+The selected Agent has an existing project containing:
+
+```text
+src/greet.js
+tests/greet.test.js
+README.md
+package.json
+.env
+deployment/config.yml
+```
+
+The implementation initially contains:
+
+```js
+export function greet(name) {
+  return `Hello, ${name}`;
+}
+```
+
+The existing test expects:
+
+```text
+Hello, Ada!
+```
+
+Therefore the workspace starts with a real failing test.
+
+---
 
 ## User task
 
-```text
-Improve the email validation so addresses containing consecutive dots
-are rejected.
+The user submits the following task through the Agent Launchpad Playground:
 
-Add corresponding edge-case tests, run the authentication test suite,
-and update README.md to document the new validation behaviour.
+```text
+Fix the existing src/greet.js implementation so the existing test passes.
+
+Do not modify tests/greet.test.js or package.json.
+
+Complete the work in this exact order:
+
+1. Inspect src/greet.js and tests/greet.test.js.
+2. Modify src/greet.js only as needed.
+3. Run exactly this standalone command:
+
+npm test
+
+Wait for it to finish.
+
+4. After the test finishes, run exactly this standalone command:
+
+echo "Greeting behavior verified." >> README.md
+
+Do not suppress the README permission error.
+If the README write fails, report it and finish the task.
+
+Do not install dependencies.
+Do not create new files.
+Do not create test tooling.
+Do not chain commands.
 ```
 
-The planner requests the authority it expects to need.
+Submitting the task creates a Run in:
 
-The human then approves:
+```text
+awaiting_approval
+```
+
+Codex has not started yet.
+
+---
+
+## Unprivileged preflight
+
+Anti-Ultron first sends the task through its unprivileged planning stage.
+
+The planner can inspect the bounded workspace inventory and propose an Execution Contract.
+
+It cannot:
+
+```text
+run Codex
+execute shell commands
+modify the workspace
+grant itself write authority
+```
+
+Its plan includes:
+
+```text
+1. Inspect src/greet.js and tests/greet.test.js.
+2. Modify src/greet.js.
+3. Run npm test.
+4. Attempt to update README.md.
+```
+
+The plan expresses what the Agent intends to do.
+
+It does not grant the Agent permission to do it.
+
+---
+
+## Human-approved authority
+
+Before execution, the human reviews the proposed contract.
+
+For the demo, the final approved authority is:
 
 ```text
 Writable
-src/**
-tests/**
 
+src/**
+```
+
+with:
+
+```text
 Protected
+
+tests/**
 README.md
+package.json
 .env
 deployment/**
 ```
 
-During execution:
+This means the Agent can change implementation code inside `src/**`.
+
+It cannot modify:
 
 ```text
-src/auth.ts             modified
-tests/auth.test.ts      modified
-README.md               blocked
-test command            executed
+the test that evaluates its work
+the README
+package configuration
+environment files
+deployment configuration
 ```
 
-Anti-Ultron then shows:
+Anything not explicitly writable remains read-only by default.
 
-- the immutable Approved Contract;
-- resulting regular-file changes;
-- supported policy-denial evidence;
-- the observed test-command result;
-- the recovery option.
+The authority precedence rule is:
 
-The user can finally select:
+```text
+Protected paths
+     >
+Approved writable paths
+     >
+Default read-only workspace
+```
+
+The Agent may request broader authority.
+
+The human does not grant it.
+
+---
+
+## Approval and enforcement
+
+The user selects:
+
+```text
+Approve & Run
+```
+
+Anti-Ultron's trusted backend then:
+
+```text
+validates the contract
+        ↓
+revalidates workspace paths
+        ↓
+freezes the Approved Contract
+        ↓
+compiles it into filesystem authority
+        ↓
+creates the trusted pre-run rollback snapshot
+        ↓
+captures the PRE workspace manifest
+        ↓
+starts the Agent Runtime
+```
+
+The contract is not merely added to the Agent's prompt.
+
+Anti-Ultron translates the approved authority into Docker/Linux filesystem capabilities.
+
+Conceptually:
+
+```text
+/workspace               READ ONLY
+
+/workspace/src/**         READ + WRITE
+
+tests/**                  READ ONLY
+README.md                 READ ONLY
+package.json              READ ONLY
+.env                      READ ONLY
+deployment/**             READ ONLY
+```
+
+The enforcement sits below the model layer.
+
+---
+
+## Agent execution
+
+The autonomous Agent now performs the approved task.
+
+It inspects:
+
+```text
+src/greet.js
+tests/greet.test.js
+```
+
+It fixes the implementation inside its approved writable scope.
+
+The resulting implementation returns:
+
+```text
+Hello, Ada!
+```
+
+The Agent then runs:
+
+```bash
+npm test
+```
+
+The existing protected test passes.
+
+The Agent subsequently attempts:
+
+```bash
+echo "Greeting behavior verified." >> README.md
+```
+
+Updating README.md was part of its planned intent.
+
+But README.md is explicitly protected by the human-approved contract.
+
+The write therefore fails at the filesystem boundary.
+
+The Agent wanted to perform the action.
+
+It did not have the authority to perform it.
+
+---
+
+## Observed execution evidence
+
+Anti-Ultron does not ask the Agent to describe what happened and treat that response as truth.
+
+It independently combines trusted workspace evidence with supported Runtime evidence.
+
+The final demo produces:
+
+```text
+✓ Modified src/greet.js
+
+✓ Test command passed
+
+🚫 Blocked README.md
+   Explicitly protected
+```
+
+The resulting workspace summary shows:
+
+```text
+RESULTING REGULAR-FILE CONTENT CHANGES
+1 modified
+
+TEST EXECUTION
+✓ Test command passed
+
+AUTHORITY BLOCKS
+1
+```
+
+This separates two fundamentally different concepts:
+
+```text
+PLAN
+Approved intent
+
+vs.
+
+EXECUTED EVIDENCE
+Observed record
+```
+
+The approved plan shows that updating README.md was intended.
+
+The execution evidence shows that the attempted write was denied.
+
+An approved action is therefore never treated as proof that the action actually occurred.
+
+---
+
+## Why the test is protected
+
+The demo intentionally grants:
+
+```text
+src/**
+```
+
+write authority while keeping:
+
+```text
+tests/**
+```
+
+protected.
+
+The Agent therefore cannot simply change the test to make its own implementation appear correct.
+
+The test command passes against the pre-existing human-controlled test.
+
+Anti-Ultron reports only the observed command outcome:
+
+```text
+Test command passed
+```
+
+It does not claim that this proves semantic correctness.
+
+---
+
+## Why the README block matters
+
+README.md is part of the Agent's approved plan.
+
+However, it is not part of the Agent's approved write authority.
+
+This demonstrates the distinction Anti-Ultron is designed around:
+
+```text
+Intent ≠ Authority
+```
+
+The Agent can decide that changing README.md would help complete the task.
+
+It can request permission to do so.
+
+It cannot grant that permission to itself.
+
+Because the contract is enforced below the model layer, asking the Agent to "behave" is not the security mechanism.
+
+The filesystem boundary is.
+
+---
+
+## Trusted Workspace Rollback
+
+Before Codex starts, Anti-Ultron creates a trusted bounded snapshot of the workspace.
+
+After the successful demo Run, the user can select:
 
 ```text
 Restore pre-run state
 ```
 
-to restore the workspace without asking Codex to undo itself.
+The rollback is performed by trusted backend code rather than by the autonomous Agent.
+
+For this demo:
+
+```text
+Modified src/greet.js
+        ↓
+original contents restored
+```
+
+The original failing implementation returns.
+
+README.md remains unchanged because its attempted modification never succeeded.
+
+Historical execution evidence remains visible because the original Run still occurred.
+
+Rollback restores the workspace.
+
+It does not rewrite history.
 
 ---
+
+## Complete demo flow
+
+```text
+Select existing Agent
+        ↓
+Submit real task
+        ↓
+Unprivileged AI preflight
+        ↓
+Proposed Execution Contract
+        ↓
+Human reviews authority
+        ↓
+Writable: src/**
+Protected: tests/**, README.md, package.json, .env, deployment/**
+        ↓
+Approve & Run
+        ↓
+Trusted authority compilation
+        ↓
+Pre-run rollback snapshot
+        ↓
+PRE workspace manifest
+        ↓
+Codex executes
+        ↓
+src/greet.js modified
+        ↓
+npm test passes
+        ↓
+README.md write attempted
+        ↓
+OS/filesystem denies write
+        ↓
+POST workspace manifest
+        ↓
+Anti-Ultron evidence
+        ↓
+Modified src/greet.js
+Test command passed
+Blocked README.md — Explicitly protected
+        ↓
+Restore pre-run state
+```
+
+---
+
+## What the demo proves
+
+The scenario demonstrates the complete Anti-Ultron V1 security boundary:
+
+| Property | Demonstrated |
+| --- | --- |
+| Agent selected from the frontend | ✅ |
+| Real task submitted through Playground | ✅ |
+| AI-generated preflight plan | ✅ |
+| Human review before execution | ✅ |
+| Human-controlled write authority | ✅ |
+| Backend-controlled approval | ✅ |
+| Default-deny workspace writes | ✅ |
+| Protected paths override Agent intent | ✅ |
+| Real Agent execution | ✅ |
+| Existing protected test executed | ✅ |
+| Successful authorised source modification | ✅ |
+| Unauthorized README write physically blocked | ✅ |
+| Runtime-derived test outcome | ✅ |
+| Independently observed workspace mutation | ✅ |
+| Human-readable authority-block evidence | ✅ |
+| Trusted pre-run recovery snapshot | ✅ |
+| Workspace Rollback | ✅ |
+
+The central guarantee is intentionally narrow:
+
+> **Anti-Ultron controls persistent workspace mutation authority.**
+
+It does not claim that the Agent is fully sandboxed from every possible side effect.
+
+The demo instead proves one concrete property:
+
+> **The AI can request authority. It cannot grant itself authority.**
 
 # Running Anti-Ultron locally
 
