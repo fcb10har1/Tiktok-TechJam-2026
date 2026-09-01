@@ -748,40 +748,57 @@ describe("Agent lifecycle", () => {
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 
-  it("falls back safely when planning returns invalid paths", async () => {
-    for (const planner of [
-      new FakePlanner({
-        ...basicProposal,
-        writablePaths: ["../outside"],
-      }),
+  it("rejects an unsafe proposed path without falling back or executing", async () => {
+    const runner = new FakeRunner();
+    const service = await makeService(
+      runner,
+      {},
+      new FakePlanner({ ...basicProposal, writablePaths: ["../outside"] }),
+    );
+    const agent = await service.createAgent({ name: "Sanitized proposal" });
+
+    const { run } = await service.sendMessage(agent.id, "Review safely");
+
+    expect(run).toMatchObject({
+      status: "awaiting_approval",
+      executionContract: {
+        version: 1,
+        writablePaths: [],
+        protectedPaths: [".env", "deployment"],
+        proposalSource: "ai",
+        proposalNotice: null,
+        approvedAt: null,
+      },
+    });
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
+
+  it("bounds a maximum-size protected proposal while preserving defaults", async () => {
+    const runner = new FakeRunner();
+    const service = await makeService(
+      runner,
+      {},
       new FakePlanner({
         ...basicProposal,
         protectedPaths: Array.from({ length: 100 }, (_, index) => "safe-" + index),
       }),
-    ]) {
-      const runner = new FakeRunner();
-      const service = await makeService(runner, {}, planner);
-      const agent = await service.createAgent({ name: "Fallback" });
+    );
+    const agent = await service.createAgent({ name: "Bounded proposal" });
 
-      const { run } = await service.sendMessage(agent.id, "Review manually");
+    const { run } = await service.sendMessage(agent.id, "Review safely");
+    const contract = run.executionContract;
 
-      expect(run).toMatchObject({
-        status: "awaiting_approval",
-        executionContract: {
-          version: 1,
-          goal: "Review manually",
-          writablePaths: [],
-          protectedPaths: [".env", "deployment"],
-          riskLevel: "medium",
-          proposalSource: "fallback",
-          proposalNotice:
-            "AI proposal unavailable: the proposal contained an invalid workspace path. Configure authority manually or retry AI proposal.",
-          approvedAt: null,
-        },
-      });
-      expect(runner.calls).toHaveLength(0);
-      await service.cancelRun(run.id);
-    }
+    expect(contract).toMatchObject({
+      version: 1,
+      proposalSource: "ai",
+      proposalNotice: null,
+      protectedPaths: expect.arrayContaining([".env", "deployment", "safe-0"]),
+    });
+    expect(contract?.protectedPaths).toHaveLength(100);
+    expect(contract?.protectedPaths).not.toContain("safe-98");
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
   });
 
   it("lets a human protect an AI-proposed writable path before approval", async () => {
@@ -942,14 +959,6 @@ describe("Agent lifecycle", () => {
   it.each([
     ["provider returned 429", new Error("provider returned 429")],
     ["planner returned malformed JSON", new Error("planner returned malformed JSON")],
-    [
-      "planner returned invalid paths",
-      {
-        ...basicProposal,
-        writablePaths: ["../outside"],
-        removedProtectedPaths: [],
-      },
-    ],
   ] as Array<[string, ContractAmendment | Error]>)(
     "preserves the current contract exactly when negotiation fails: %s",
     async (_failureName, amendmentResult) => {
@@ -983,6 +992,40 @@ describe("Agent lifecycle", () => {
       await service.cancelRun(run.id);
     },
   );
+
+  it("applies a negotiation after dropping its unsafe proposed paths", async () => {
+    const runner = new FakeRunner();
+    const planner = new FakePlanner(basicProposal, [
+      {
+        ...basicProposal,
+        writablePaths: ["../outside"],
+        protectedPaths: ["package.json", "/etc"],
+        removedProtectedPaths: [],
+      },
+    ]);
+    const service = await makeService(runner, {}, planner);
+    const agent = await service.createAgent({ name: "Sanitized negotiation" });
+    const { run } = await service.sendMessage(agent.id, "Update authentication");
+
+    const result = await service.negotiateExecutionContract(
+      run.id,
+      "Keep the workspace safe.",
+    );
+
+    expect(result).toMatchObject({
+      applied: true,
+      notice: null,
+      run: {
+        status: "awaiting_approval",
+        executionContract: {
+          writablePaths: [],
+          protectedPaths: [".env", "deployment", "package.json"],
+        },
+      },
+    });
+    expect(runner.calls).toHaveLength(0);
+    await service.cancelRun(run.id);
+  });
 
   it("removes an existing protection only through explicit structured removal intent", async () => {
     const runner = new FakeRunner();

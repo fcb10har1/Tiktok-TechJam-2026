@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  mergeProtectedPaths,
   normalizeProtectedPaths,
   normalizeWritablePaths,
 } from "./protected-paths.js";
@@ -51,5 +52,21 @@ describe("normalizeProtectedPaths", () => {
     expect(() => normalizeWritablePaths(["src/../README.md"])).toThrow(
       "workspace-relative",
     );
+  });
+
+  it("preserves existing protections while bounding a large planner proposal", () => {
+    const proposedPaths = Array.from(
+      { length: 100 },
+      (_, index) => "generated/path-" + index,
+    );
+
+    const merged = mergeProtectedPaths(
+      [".env", "deployment", "package.json"],
+      proposedPaths,
+    );
+
+    expect(merged).toHaveLength(100);
+    expect(merged.slice(0, 3)).toEqual([".env", "deployment", "package.json"]);
+    expect(merged).not.toContain("generated/path-97");
   });
 });

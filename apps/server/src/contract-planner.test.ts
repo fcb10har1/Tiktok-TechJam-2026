@@ -114,6 +114,31 @@ describe("ArkContractPlanner", () => {
     expect(JSON.stringify(caught)).not.toContain("secret body text");
   });
 
+  it("canonicalizes common planner path spellings and drops unsafe entries", () => {
+    expect(
+      parseContractProposal({
+        ...validProposal,
+        writablePaths: [
+          "/workspace/src/**/*",
+          "`tests/*`",
+          "src/**/*.ts",
+          "../outside",
+          "C:\\outside",
+        ],
+        protectedPaths: [
+          "'/workspace/deployment/**'",
+          ".env*",
+          "**/.env",
+          "/etc",
+          ".env",
+        ],
+      }),
+    ).toMatchObject({
+      writablePaths: ["src/**", "tests/**"],
+      protectedPaths: ["deployment/**", ".env"],
+    });
+  });
+
   it("defaults planner configuration to ARK_MODEL and a 30-second timeout", () => {
     expect(config()).toMatchObject({
       arkModel: "planner-model",
@@ -161,6 +186,10 @@ describe("ArkContractPlanner", () => {
     });
     expect(JSON.stringify(body.input)).toContain("Change src/index.ts");
     expect(JSON.stringify(body.input)).toContain("src/index.ts");
+    expect(body.instructions).toContain("The only supported wildcard is a terminal /**");
+    expect(body.text.format.schema.properties.writablePaths.items.description).toContain(
+      "Workspace-relative POSIX",
+    );
   });
 
   it("sends the complete current contract for a strict tool-free amendment", async () => {
@@ -249,7 +278,7 @@ describe("ArkContractPlanner", () => {
     expect(retryBody.instructions).toContain("Return only one raw JSON object");
   });
 
-  it("applies the same strict validation to compatibility output", async () => {
+  it("drops unsafe compatibility-output paths before strict persistence", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -262,8 +291,9 @@ describe("ArkContractPlanner", () => {
       );
     const planner = new ArkContractPlanner(config(), fetchMock as typeof fetch);
 
-    await expect(planner.propose(planningInput())).rejects.toMatchObject({
-      code: "path_invalid",
+    await expect(planner.propose(planningInput())).resolves.toMatchObject({
+      writablePaths: validProposal.writablePaths,
+      protectedPaths: [],
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -324,9 +354,8 @@ describe("ArkContractPlanner", () => {
   it.each([
     ["not json", "malformed_json"],
     [JSON.stringify({ ...validProposal, riskLevel: "critical" }), "schema_invalid"],
-    [JSON.stringify({ ...validProposal, writablePaths: ["../outside"] }), "path_invalid"],
     [JSON.stringify({ ...validProposal, unexpected: true }), "schema_invalid"],
-  ])("categorizes malformed, schema-invalid, or unsafe output %#", async (text, code) => {
+  ])("categorizes malformed or schema-invalid output %#", async (text, code) => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({

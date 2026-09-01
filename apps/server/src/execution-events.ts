@@ -85,7 +85,9 @@ function writeTarget(command: string): CommandTarget | null {
     "",
   );
   const deterministic = !/(?:\|\||&&|;|(?<!\|)\|(?!\|))/.test(withoutSafeMkdir);
-  const redirection = body.match(/(?:^|\s)(?:>|>>)\s*["']?([^\s"';&|]+)["']?/);
+  const redirection = body.match(
+    /(?:^|\s)(?:>>|>)\s*["']?([^\s"';&|<>]+)["']?/,
+  );
   if (redirection) {
     const relative = workspaceRelativePath(redirection[1]!);
     if (relative) return { path: relative, writeKind: "write", deterministic };
